@@ -234,6 +234,74 @@ def test_local_pyannote_diarizer_returns_limitation_for_unsupported_output(monke
     assert any("unsupported output type DiarizeOutput" in limitation for limitation in result.limitations)
 
 
+def test_local_pyannote_diarizer_passes_min_max_speaker_hints_from_settings(monkeypatch):
+    pyannote_module = types.ModuleType("pyannote")
+    pyannote_audio_module = types.ModuleType("pyannote.audio")
+    pyannote_audio_module.Pipeline = _CapturingPipeline
+
+    monkeypatch.setattr(
+        "voicescript.providers.speech._module_status",
+        lambda *args, **kwargs: {"available": True, "detail": "available"},
+    )
+    monkeypatch.setitem(sys.modules, "pyannote", pyannote_module)
+    monkeypatch.setitem(sys.modules, "pyannote.audio", pyannote_audio_module)
+
+    diarizer = LocalPyannoteDiarizer(
+        Settings(
+            pyannote_auth_token="token",
+            pyannote_min_speakers=2,
+            pyannote_max_speakers=4,
+        )
+    )
+
+    diarizer.diarize(Path("court.wav"))
+
+    assert _CapturingPipeline.last_kwargs.get("min_speakers") == 2
+    assert _CapturingPipeline.last_kwargs.get("max_speakers") == 4
+
+
+def test_local_pyannote_diarizer_omits_hint_kwargs_when_unset(monkeypatch):
+    pyannote_module = types.ModuleType("pyannote")
+    pyannote_audio_module = types.ModuleType("pyannote.audio")
+    pyannote_audio_module.Pipeline = _CapturingPipeline
+
+    monkeypatch.setattr(
+        "voicescript.providers.speech._module_status",
+        lambda *args, **kwargs: {"available": True, "detail": "available"},
+    )
+    monkeypatch.setitem(sys.modules, "pyannote", pyannote_module)
+    monkeypatch.setitem(sys.modules, "pyannote.audio", pyannote_audio_module)
+
+    diarizer = LocalPyannoteDiarizer(Settings(pyannote_auth_token="token"))
+
+    diarizer.diarize(Path("court.wav"))
+
+    assert "min_speakers" not in _CapturingPipeline.last_kwargs
+    assert "max_speakers" not in _CapturingPipeline.last_kwargs
+
+
+def test_local_pyannote_diarizer_per_call_hints_override_settings(monkeypatch):
+    pyannote_module = types.ModuleType("pyannote")
+    pyannote_audio_module = types.ModuleType("pyannote.audio")
+    pyannote_audio_module.Pipeline = _CapturingPipeline
+
+    monkeypatch.setattr(
+        "voicescript.providers.speech._module_status",
+        lambda *args, **kwargs: {"available": True, "detail": "available"},
+    )
+    monkeypatch.setitem(sys.modules, "pyannote", pyannote_module)
+    monkeypatch.setitem(sys.modules, "pyannote.audio", pyannote_audio_module)
+
+    diarizer = LocalPyannoteDiarizer(
+        Settings(pyannote_auth_token="token", pyannote_min_speakers=2)
+    )
+
+    diarizer.diarize(Path("court.wav"), hints={"min_speakers": 3, "max_speakers": 5})
+
+    assert _CapturingPipeline.last_kwargs.get("min_speakers") == 3
+    assert _CapturingPipeline.last_kwargs.get("max_speakers") == 5
+
+
 def test_local_pyannote_diarizer_normalizes_segment_sequence_output(monkeypatch):
     pyannote_module = types.ModuleType("pyannote")
     pyannote_audio_module = types.ModuleType("pyannote.audio")
@@ -441,4 +509,16 @@ class _SequenceOutputPipeline:
         return cls()
 
     def __call__(self, payload):
+        return SequenceOutput()
+
+
+class _CapturingPipeline:
+    last_kwargs: dict = {}
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        return cls()
+
+    def __call__(self, payload, **kwargs):
+        type(self).last_kwargs = dict(kwargs)
         return SequenceOutput()

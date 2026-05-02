@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 
+from .fusion import apply_speaker_fusion
 from .models import (
     AudioMetadata,
     AudioQuality,
@@ -40,7 +41,7 @@ def build_report_from_measurements(
     transcription: TranscriptionResult | dict[str, object] | None = None,
     diarization: DiarizationResult | dict[str, object] | None = None,
 ) -> ForensicReport:
-    estimated_speaker_count = _estimate_speaker_count(speaker_segments)
+    raw_estimate = _estimate_speaker_count(speaker_segments)
     estimated_microphone_count = Estimate(
         value=channel_analysis.estimated_microphone_count,
         confidence=channel_analysis.confidence,
@@ -48,6 +49,19 @@ def build_report_from_measurements(
     )
 
     findings = _build_findings(metadata, silence, volume, channel_analysis)
+    separation = _coerce_source_separation(source_separation)
+    transcription_result = _coerce_transcription(transcription)
+    diarization_result = _coerce_diarization(diarization)
+
+    estimated_speaker_count, fusion_findings = _fuse_speaker_estimate(
+        raw_estimate=raw_estimate,
+        diarization=diarization_result,
+        transcription=transcription_result,
+        channel_analysis=channel_analysis,
+        metadata=metadata,
+    )
+    findings.extend(fusion_findings)
+
     issues = [finding.finding for finding in findings]
     recommendations = _build_recommendations(findings, estimated_speaker_count)
     limitations = [
@@ -58,9 +72,6 @@ def build_report_from_measurements(
         limitations.append("Speaker count is unknown because diarization was unavailable or inconclusive.")
     if extra_limitations:
         limitations.extend(extra_limitations)
-    separation = _coerce_source_separation(source_separation)
-    transcription_result = _coerce_transcription(transcription)
-    diarization_result = _coerce_diarization(diarization)
     limitations.extend(separation.limitations)
 
     evidence_trail = [
@@ -113,6 +124,43 @@ def build_report_from_measurements(
         limitations=limitations,
         summary_text=summary_text,
         provenance=provenance,
+    )
+
+
+def _fuse_speaker_estimate(
+    *,
+    raw_estimate: Estimate,
+    diarization: DiarizationResult,
+    transcription: TranscriptionResult,
+    channel_analysis: ChannelAnalysis,
+    metadata: AudioMetadata,
+) -> tuple[Estimate, list[ForensicFinding]]:
+    diarization_for_fusion = diarization
+    if diarization.estimated_speaker_count is None and raw_estimate.value is not None:
+        diarization_for_fusion = diarization.model_copy(
+            update={
+                "estimated_speaker_count": raw_estimate.value,
+                "confidence": raw_estimate.confidence,
+            }
+        )
+
+    fused, fusion_findings = apply_speaker_fusion(
+        diarization=diarization_for_fusion,
+        transcription=transcription,
+        channel_analysis=channel_analysis,
+        metadata=metadata,
+    )
+
+    if not fusion_findings and fused.value == raw_estimate.value and fused.confidence == raw_estimate.confidence:
+        return raw_estimate, []
+
+    merged_evidence = list(raw_estimate.evidence)
+    for line in fused.evidence:
+        if line not in merged_evidence:
+            merged_evidence.append(line)
+    return (
+        Estimate(value=fused.value, confidence=fused.confidence, evidence=merged_evidence),
+        fusion_findings,
     )
 
 

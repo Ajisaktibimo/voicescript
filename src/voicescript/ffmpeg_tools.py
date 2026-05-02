@@ -88,8 +88,21 @@ class FFmpegTools:
             required_binary=self.settings.ffmpeg_binary,
         )
 
-    def normalize_for_speech(self, input_file: Path, output_file: Path) -> ToolResult:
+    def normalize_for_speech(
+        self,
+        input_file: Path,
+        output_file: Path,
+        *,
+        channels: int | None = None,
+        force_mono: bool = False,
+    ) -> ToolResult:
         output_file.parent.mkdir(parents=True, exist_ok=True)
+        if force_mono:
+            target_channels = 1
+        elif channels is None:
+            target_channels = 1
+        else:
+            target_channels = max(1, int(channels))
         return self.run(
             [
                 self.settings.ffmpeg_binary,
@@ -99,7 +112,7 @@ class FFmpegTools:
                 "-ar",
                 "16000",
                 "-ac",
-                "1",
+                str(target_channels),
                 str(output_file),
             ],
             required_binary=self.settings.ffmpeg_binary,

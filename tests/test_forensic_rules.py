@@ -8,6 +8,7 @@ from voicescript.models import (
     SpeakerSegment,
     VolumeStats,
 )
+from voicescript.schemas import DiarizationResult, TranscriptionResult, TranscriptSegment
 
 
 def test_forensic_report_keeps_estimates_confidence_and_evidence():
@@ -129,6 +130,88 @@ def test_report_does_not_infer_speakers_when_diarization_unavailable():
     assert report.estimated_speaker_count.value is None
     assert report.estimated_speaker_count.confidence == "low"
     assert "Diarization unavailable" in report.estimated_speaker_count.evidence[0]
+
+
+def test_report_fusion_downgrades_one_speaker_when_transcript_implies_more():
+    diar = DiarizationResult(
+        provider="local-pyannote",
+        output_type="fixture",
+        speaker_segments=[
+            SpeakerSegment(speaker="SPEAKER_00", start_seconds=0, end_seconds=2, text="")
+        ],
+        estimated_speaker_count=1,
+        confidence="medium",
+    )
+    trans = TranscriptionResult(
+        provider="local-faster-whisper",
+        output_type="fixture",
+        transcript_text=(
+            "Q: Officer, what did the witness say? "
+            "A: She replied that the suspect was uncooperative."
+        ),
+        transcript_segments=[
+            TranscriptSegment(
+                start_seconds=0.0,
+                end_seconds=10.0,
+                text=(
+                    "Q: Officer, what did the witness say? "
+                    "A: She replied that the suspect was uncooperative."
+                ),
+            )
+        ],
+    )
+
+    report = build_report_from_measurements(
+        file_name="court.wav",
+        sha256="cafebabe",
+        metadata=AudioMetadata(
+            file_name="court.wav",
+            duration_seconds=120.0,
+            bitrate=128000,
+            sample_rate=16000,
+            channels=1,
+            audio_streams=1,
+            channel_layout="mono",
+            codec_name="pcm_s16le",
+            container_format="wav",
+            raw={},
+        ),
+        silence=SilenceSummary(segments=[], silence_ratio=0.0),
+        volume=VolumeStats(
+            avg_volume_db=-20.0,
+            max_volume_db=-3.0,
+            clipping_detected=False,
+            low_volume_detected=False,
+            histogram_0db=0,
+        ),
+        channel_analysis=ChannelAnalysis(
+            measured_channels=1,
+            audio_streams=1,
+            channel_layout="mono",
+            duplicated_channels_likely=False,
+            channel_imbalance_db=None,
+            estimated_microphone_count=1,
+            confidence="medium",
+            evidence=[],
+        ),
+        speaker_segments=[
+            SpeakerSegment(speaker="SPEAKER_00", start_seconds=0, end_seconds=2, text="")
+        ],
+        transcript_text=trans.transcript_text,
+        provenance=[],
+        transcription=trans,
+        diarization=diar,
+    )
+
+    assert report.estimated_speaker_count.value >= 2
+    assert report.estimated_speaker_count.confidence == "low"
+    assert any(
+        finding.finding == "Diarization-transcript speaker count mismatch"
+        for finding in report.tamper_indicators
+    )
+    # raw diarization unchanged
+    assert report.diarization.estimated_speaker_count == 1
+    assert report.diarization.confidence == "medium"
 
 
 def test_unknown_speaker_label_not_counted():

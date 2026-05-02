@@ -249,7 +249,12 @@ class LocalPyannoteDiarizer:
             "pyannote.audio": status,
         }
 
-    def diarize(self, input_file: Path) -> DiarizationResult:
+    def diarize(
+        self,
+        input_file: Path,
+        *,
+        hints: dict | None = None,
+    ) -> DiarizationResult:
         status = _module_status("pyannote.audio", needs_token=True, token=self.settings.pyannote_auth_token)
         if not status["available"]:
             return _diarization_result(
@@ -268,6 +273,8 @@ class LocalPyannoteDiarizer:
                 limitations=["Diarization skipped because PYANNOTE_AUTH_TOKEN is not configured."],
             )
 
+        pipeline_kwargs = self._resolve_pipeline_hints(hints)
+
         try:
             from pyannote.audio import Pipeline
 
@@ -275,7 +282,7 @@ class LocalPyannoteDiarizer:
                 self.settings.pyannote_model,
                 token=self.settings.pyannote_auth_token,
             )
-            diarization = pipeline(str(input_file))
+            diarization = pipeline(str(input_file), **pipeline_kwargs)
         except Exception as exc:
             return _diarization_result(
                 provider=self.provider_name,
@@ -287,6 +294,9 @@ class LocalPyannoteDiarizer:
 
         output_type = type(diarization).__name__
         segments, limitations = _parse_pyannote_diarization(diarization)
+        evidence = [f"Raw diarization output type: {output_type}."]
+        if pipeline_kwargs:
+            evidence.append(f"Pyannote pipeline hints: {pipeline_kwargs}.")
         return _diarization_result(
             provider=self.provider_name,
             model=self.settings.pyannote_model,
@@ -294,8 +304,20 @@ class LocalPyannoteDiarizer:
             output_type=output_type,
             speaker_segments=segments,
             limitations=limitations,
-            evidence=[f"Raw diarization output type: {output_type}."],
+            evidence=evidence,
         )
+
+    def _resolve_pipeline_hints(self, hints: dict | None) -> dict[str, int]:
+        merged: dict[str, int] = {}
+        if self.settings.pyannote_min_speakers is not None:
+            merged["min_speakers"] = int(self.settings.pyannote_min_speakers)
+        if self.settings.pyannote_max_speakers is not None:
+            merged["max_speakers"] = int(self.settings.pyannote_max_speakers)
+        if hints:
+            for key in ("min_speakers", "max_speakers", "num_speakers"):
+                if hints.get(key) is not None:
+                    merged[key] = int(hints[key])
+        return merged
 
 
 def _parse_pyannote_diarization(diarization: object) -> tuple[list[SpeakerSegment], list[str]]:
@@ -606,6 +628,14 @@ class SpeechAnalyzer:
     def readiness(self) -> dict[str, dict[str, str | bool]]:
         return {**self.transcriber.readiness(), **self.diarizer.readiness()}
 
+    def _call_diarizer(self, diarization_input: Path, *, hints: dict | None) -> DiarizationResult:
+        if hints:
+            try:
+                return self.diarizer.diarize(diarization_input, hints=hints)
+            except TypeError:
+                pass
+        return self.diarizer.diarize(diarization_input)
+
     def analyze(
         self,
         transcription_input: Path,
@@ -613,6 +643,7 @@ class SpeechAnalyzer:
         diarization_input: Path | None = None,
         transcription_source: str = "analysis_input",
         diarization_source: str = "analysis_input",
+        diarization_hints: dict | None = None,
     ) -> SpeechAnalysisResult:
         diarization_input = diarization_input or transcription_input
         transcription = _tag_transcription_input(
@@ -621,7 +652,7 @@ class SpeechAnalyzer:
             transcription_source,
         )
         diarization = _tag_diarization_input(
-            self.diarizer.diarize(diarization_input),
+            self._call_diarizer(diarization_input, hints=diarization_hints),
             diarization_input,
             diarization_source,
         )

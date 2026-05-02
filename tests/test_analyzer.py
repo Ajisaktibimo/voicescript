@@ -44,9 +44,10 @@ def test_demucs_vocals_path_is_used_for_speech_when_available(runtime_dir):
     vocals = runtime_dir / "vocals.wav"
     vocals.write_bytes(b"vocals")
     speech = RecordingSpeechAnalyzer()
+    ffmpeg = FakeFFmpegTools()
     analyzer = ForensicAnalyzer(
         settings=_settings(runtime_dir),
-        ffmpeg_tools=FakeFFmpegTools(),
+        ffmpeg_tools=ffmpeg,
         speech_analyzer=speech,
         demucs_separator=FixedSourceSeparator(
             SourceSeparationResult(available=True, enabled=True, vocals_path=str(vocals))
@@ -56,23 +57,28 @@ def test_demucs_vocals_path_is_used_for_speech_when_available(runtime_dir):
     report = analyzer.analyze_file(audio)
 
     assert speech.transcription_paths == [vocals]
-    assert speech.diarization_paths == [audio]
+    assert len(speech.diarization_paths) == 1
+    assert speech.diarization_paths[0].suffix == ".wav"
+    assert speech.diarization_paths[0] != audio
+    assert ffmpeg.normalized_inputs == [(audio, speech.diarization_paths[0])]
     assert report.source_separation.vocals_path == str(vocals)
     assert report.transcription.input_source == "demucs_vocals"
     assert report.transcription.input_path == str(vocals)
-    assert report.diarization.input_source == "original_audio"
-    assert report.diarization.input_path == str(audio)
+    assert report.diarization.input_source == "normalized_original_audio"
+    assert report.diarization.input_path == str(speech.diarization_paths[0])
     assert report.transcription.provider == "test-transcriber"
     assert report.diarization.provider == "test-diarizer"
+    assert any(item.tool == "ffmpeg normalize diarization" for item in report.provenance)
 
 
 def test_demucs_unavailable_falls_back_to_original_for_speech(runtime_dir):
     audio = runtime_dir / "court.wav"
     audio.write_bytes(b"audio")
     speech = RecordingSpeechAnalyzer()
+    ffmpeg = FakeFFmpegTools()
     analyzer = ForensicAnalyzer(
         settings=_settings(runtime_dir),
-        ffmpeg_tools=FakeFFmpegTools(),
+        ffmpeg_tools=ffmpeg,
         speech_analyzer=speech,
         demucs_separator=FixedSourceSeparator(
             SourceSeparationResult(
@@ -86,8 +92,87 @@ def test_demucs_unavailable_falls_back_to_original_for_speech(runtime_dir):
     report = analyzer.analyze_file(audio)
 
     assert speech.transcription_paths == [audio]
-    assert speech.diarization_paths == [audio]
+    assert len(speech.diarization_paths) == 1
+    assert speech.diarization_paths[0].suffix == ".wav"
+    assert ffmpeg.normalized_inputs == [(audio, speech.diarization_paths[0])]
     assert "Demucs is not installed." in report.limitations
+
+
+def test_diarization_input_preserves_stereo_when_source_is_stereo(runtime_dir):
+    audio = runtime_dir / "court.wav"
+    audio.write_bytes(b"audio")
+    speech = RecordingSpeechAnalyzer()
+    ffmpeg = FakeFFmpegTools(channels=2, channel_layout="stereo")
+    analyzer = ForensicAnalyzer(
+        settings=_settings(runtime_dir),
+        ffmpeg_tools=ffmpeg,
+        speech_analyzer=speech,
+        demucs_separator=FixedSourceSeparator(
+            SourceSeparationResult(available=False, enabled=True, limitations=[])
+        ),
+    )
+
+    analyzer.analyze_file(audio)
+
+    assert ffmpeg.normalized_channels == [2]
+
+
+def test_pyannote_hints_flow_from_settings_into_speech_analyzer(runtime_dir):
+    audio = runtime_dir / "court.wav"
+    audio.write_bytes(b"audio")
+    speech = RecordingSpeechAnalyzer()
+    settings = _settings(runtime_dir).model_copy(
+        update={"pyannote_min_speakers": 2, "pyannote_max_speakers": 5}
+    )
+    analyzer = ForensicAnalyzer(
+        settings=settings,
+        ffmpeg_tools=FakeFFmpegTools(),
+        speech_analyzer=speech,
+        demucs_separator=FixedSourceSeparator(
+            SourceSeparationResult(available=False, enabled=True, limitations=[])
+        ),
+    )
+
+    analyzer.analyze_file(audio)
+
+    assert speech.diarization_hints_seen == [{"min_speakers": 2, "max_speakers": 5}]
+
+
+def test_pyannote_hints_default_to_empty_when_settings_unset(runtime_dir):
+    audio = runtime_dir / "court.wav"
+    audio.write_bytes(b"audio")
+    speech = RecordingSpeechAnalyzer()
+    analyzer = ForensicAnalyzer(
+        settings=_settings(runtime_dir),
+        ffmpeg_tools=FakeFFmpegTools(),
+        speech_analyzer=speech,
+        demucs_separator=FixedSourceSeparator(
+            SourceSeparationResult(available=False, enabled=True, limitations=[])
+        ),
+    )
+
+    analyzer.analyze_file(audio)
+
+    assert speech.diarization_hints_seen == [{}]
+
+
+def test_diarization_input_forces_mono_when_source_is_mono(runtime_dir):
+    audio = runtime_dir / "court.wav"
+    audio.write_bytes(b"audio")
+    speech = RecordingSpeechAnalyzer()
+    ffmpeg = FakeFFmpegTools(channels=1, channel_layout="mono")
+    analyzer = ForensicAnalyzer(
+        settings=_settings(runtime_dir),
+        ffmpeg_tools=ffmpeg,
+        speech_analyzer=speech,
+        demucs_separator=FixedSourceSeparator(
+            SourceSeparationResult(available=False, enabled=True, limitations=[])
+        ),
+    )
+
+    analyzer.analyze_file(audio)
+
+    assert ffmpeg.normalized_channels == [1]
 
 
 def test_stereo_channel_count_does_not_claim_two_microphones():
@@ -159,6 +244,12 @@ def test_analyze_file_logs_pipeline_stages(runtime_dir, caplog):
 
 
 class FakeFFmpegTools:
+    def __init__(self, *, channels: int = 1, channel_layout: str = "mono"):
+        self.normalized_inputs: list[tuple[Path, Path]] = []
+        self.normalized_channels: list[int | None] = []
+        self._channels = channels
+        self._channel_layout = channel_layout
+
     def ffprobe_metadata(self, path: Path) -> ToolResult:
         return ToolResult(
             stdout=json.dumps(
@@ -174,8 +265,8 @@ class FakeFFmpegTools:
                             "codec_type": "audio",
                             "codec_name": "pcm_s16le",
                             "sample_rate": "16000",
-                            "channels": 1,
-                            "channel_layout": "mono",
+                            "channels": self._channels,
+                            "channel_layout": self._channel_layout,
                         }
                     ],
                 }
@@ -204,6 +295,24 @@ class FakeFFmpegTools:
             command=["ffmpeg", "volumedetect", str(path)],
         )
 
+    def normalize_for_speech(
+        self,
+        input_file: Path,
+        output_file: Path,
+        *,
+        channels: int | None = None,
+    ) -> ToolResult:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        output_file.write_bytes(b"normalized")
+        self.normalized_inputs.append((Path(input_file), Path(output_file)))
+        self.normalized_channels.append(channels)
+        return ToolResult(
+            stdout="",
+            stderr="",
+            exit_code=0,
+            command=["ffmpeg", "normalize", str(input_file), str(output_file)],
+        )
+
     def provenance(self, tool: str, result: ToolResult) -> CommandProvenance:
         return CommandProvenance(tool=tool, command=result.command, exit_code=result.exit_code)
 
@@ -228,6 +337,7 @@ class RecordingSpeechAnalyzer:
     def __init__(self):
         self.transcription_paths: list[Path] = []
         self.diarization_paths: list[Path] = []
+        self.diarization_hints_seen: list[dict] = []
 
     def readiness(self):
         return {}
@@ -239,10 +349,12 @@ class RecordingSpeechAnalyzer:
         diarization_input: Path | None = None,
         transcription_source: str = "analysis_input",
         diarization_source: str = "analysis_input",
+        diarization_hints: dict | None = None,
     ) -> SpeechAnalysisResult:
         diarization_input = diarization_input or transcription_input
         self.transcription_paths.append(Path(transcription_input))
         self.diarization_paths.append(Path(diarization_input))
+        self.diarization_hints_seen.append(dict(diarization_hints or {}))
         return SpeechAnalysisResult(
             transcript_text="hello",
             transcription=TranscriptionResult(

@@ -44,6 +44,7 @@ graph TD
 
     subgraph "3. ML Intelligence Pipeline"
         Original[Original / Lightly Normalized Audio]:::ml
+        N1[FFmpeg: Mono 16k WAV for Diarization]:::ml
         D1[Demucs: Isolate Vocals for ASR]:::ml
         P1[Pyannote 3.1: Diarization on Original Evidence]:::ml
         W1[Faster-Whisper: Transcription on Enhanced Vocals]:::ml
@@ -53,7 +54,8 @@ graph TD
 
     Report -->|Audio ready| Original
     Original --> D1
-    Original --> P1
+    Original --> N1
+    N1 --> P1
     D1 --> W1
     P1 --> Align
     W1 --> Align

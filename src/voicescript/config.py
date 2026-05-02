@@ -26,6 +26,8 @@ class Settings(BaseModel):
     whisper_compute_type: str = "int8"
     pyannote_model: str = "pyannote/speaker-diarization-3.1"
     pyannote_auth_token: str | None = None
+    pyannote_min_speakers: int | None = None
+    pyannote_max_speakers: int | None = None
     model_fetch_policy: str = "local_only"
     model_cache_dir: Path = Field(default=Path("data/models"))
     onnx_model_dir: Path = Field(default=Path("data/models"))
@@ -79,6 +81,8 @@ class Settings(BaseModel):
             pyannote_model=get("VOICESCRIPT_PYANNOTE_MODEL", "pyannote/speaker-diarization-3.1")
             or "pyannote/speaker-diarization-3.1",
             pyannote_auth_token=get("PYANNOTE_AUTH_TOKEN"),
+            pyannote_min_speakers=_optional_int(get("VOICESCRIPT_PYANNOTE_MIN_SPEAKERS")),
+            pyannote_max_speakers=_optional_int(get("VOICESCRIPT_PYANNOTE_MAX_SPEAKERS")),
             model_fetch_policy=model_fetch_policy,
             model_cache_dir=model_cache_dir,
             onnx_model_dir=model_cache_dir,
@@ -119,6 +123,15 @@ def _setup_windows_dlls(settings: Settings) -> None:
 
 def _truthy(value: str | None) -> bool:
     return (value or "").lower() in {"1", "true", "yes", "on"}
+
+
+def _optional_int(value: str | None) -> int | None:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return int(str(value).strip())
+    except ValueError:
+        return None
 
 
 def _load_env_values(path: Path) -> Mapping[str, str]:

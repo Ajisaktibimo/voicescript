@@ -74,19 +74,25 @@ class ForensicAnalyzer:
 
         transcription_input = Path(source_separation.vocals_path) if source_separation.vocals_path else path
         transcription_source = "demucs_vocals" if source_separation.vocals_path else "original_audio"
-        diarization_input = path
+        diarization_input, diarization_provenance = self._prepare_diarization_input(
+            path,
+            run_id=run_id,
+            channels=metadata.channels,
+        )
+        provenance.append(diarization_provenance)
         self._log_stage(
             run_id,
             "speech",
             "start",
             f"transcription_input={transcription_input} transcription_source={transcription_source} "
-            f"diarization_input={diarization_input} diarization_source=original_audio",
+            f"diarization_input={diarization_input} diarization_source=normalized_original_audio",
         )
         speech = self.speech_analyzer.analyze(
             transcription_input,
             diarization_input=diarization_input,
             transcription_source=transcription_source,
-            diarization_source="original_audio",
+            diarization_source="normalized_original_audio",
+            diarization_hints=self._diarization_hints_from_settings(),
         )
         self._log_stage(
             run_id,
@@ -166,16 +172,19 @@ class ForensicAnalyzer:
         return to_jsonable(estimate_channel_setup(metadata))
 
     def estimate_speakers(self, path: Path) -> dict[str, object]:
+        path = Path(path)
+        run_id = f"speakers:{path.name}"
+        diarization_input, diarization_provenance = self._prepare_diarization_input(path, run_id=run_id)
         speech = self.speech_analyzer.analyze(
-            Path(path),
-            diarization_input=Path(path),
+            path,
+            diarization_input=diarization_input,
             transcription_source="original_audio",
-            diarization_source="original_audio",
+            diarization_source="normalized_original_audio",
         )
         report = build_report_from_measurements(
-            file_name=Path(path).name,
-            sha256=sha256_file(Path(path)),
-            metadata=_unknown_metadata(Path(path).name),
+            file_name=path.name,
+            sha256=sha256_file(path),
+            metadata=_unknown_metadata(path.name),
             silence=SilenceSummary(),
             volume=VolumeStats(
                 avg_volume_db=None,
@@ -195,7 +204,7 @@ class ForensicAnalyzer:
             ),
             speaker_segments=speech.speaker_segments,
             transcript_text=speech.transcript_text,
-            provenance=[],
+            provenance=[diarization_provenance],
             extra_limitations=speech.limitations,
             transcription=speech.transcription,
             diarization=speech.diarization,
@@ -304,8 +313,39 @@ class ForensicAnalyzer:
 
         return metadata, silence, volume, channel_analysis, provenance
 
+    def _prepare_diarization_input(
+        self,
+        path: Path,
+        *,
+        run_id: str,
+        channels: int | None = None,
+    ) -> tuple[Path, CommandProvenance]:
+        output_file = self.settings.data_dir / "diarization" / _safe_artifact_name(run_id, path) / "mono16k.wav"
+        self._log_stage(
+            run_id,
+            "diarization_normalize",
+            "start",
+            f"input={path} output={output_file} channels={channels}",
+        )
+        result = self.ffmpeg_tools.normalize_for_speech(path, output_file, channels=channels)
+        self._log_stage(
+            run_id,
+            "diarization_normalize",
+            "done",
+            f"output={output_file}",
+        )
+        return output_file, self.ffmpeg_tools.provenance("ffmpeg normalize diarization", result)
+
     def _log_stage(self, run_id: str, stage: str, status: str, detail: str) -> None:
         logger.info("pipeline run_id=%s stage=%s status=%s %s", run_id, stage, status, detail)
+
+    def _diarization_hints_from_settings(self) -> dict[str, int]:
+        hints: dict[str, int] = {}
+        if getattr(self.settings, "pyannote_min_speakers", None) is not None:
+            hints["min_speakers"] = int(self.settings.pyannote_min_speakers)
+        if getattr(self.settings, "pyannote_max_speakers", None) is not None:
+            hints["max_speakers"] = int(self.settings.pyannote_max_speakers)
+        return hints
 
 
 def estimate_channel_setup(metadata: AudioMetadata) -> ChannelAnalysis:
@@ -400,6 +440,12 @@ def _file_size(path: Path) -> int:
         return Path(path).stat().st_size
     except OSError:
         return 0
+
+
+def _safe_artifact_name(run_id: str, path: Path) -> str:
+    raw_name = f"{run_id}_{Path(path).stem}"
+    safe_name = "".join(character if character.isalnum() else "_" for character in raw_name)
+    return safe_name.strip("_") or "audio"
 
 
 def _analyze_file_with_run_id(analyzer: ForensicAnalyzer, path: Path, *, run_id: str) -> ForensicReport:

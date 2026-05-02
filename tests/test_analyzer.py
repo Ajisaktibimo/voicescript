@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -114,6 +115,37 @@ def test_analyze_batch_collects_per_file_failures(runtime_dir):
     assert result["failures"] == [
         {"file_name": "bad.wav", "path": str(bad), "error": "decode failed"}
     ]
+
+
+def test_analyze_file_logs_pipeline_stages(runtime_dir, caplog):
+    audio = runtime_dir / "court.wav"
+    audio.write_bytes(b"audio")
+    analyzer = ForensicAnalyzer(
+        settings=_settings(runtime_dir),
+        ffmpeg_tools=FakeFFmpegTools(),
+        speech_analyzer=RecordingSpeechAnalyzer(),
+        demucs_separator=FixedSourceSeparator(
+            SourceSeparationResult(available=False, enabled=True, limitations=["Demucs is not installed."])
+        ),
+    )
+
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        analyzer.analyze_file(audio, run_id="analysis-1")
+
+    messages = [record.getMessage() for record in caplog.records]
+    expected_stages = [
+        "stage=input",
+        "stage=ffprobe",
+        "stage=silence",
+        "stage=volume",
+        "stage=channels",
+        "stage=source_separation",
+        "stage=speech",
+        "stage=hash",
+        "stage=report",
+    ]
+    for stage in expected_stages:
+        assert any("pipeline run_id=analysis-1" in message and stage in message for message in messages)
 
 
 class FakeFFmpegTools:

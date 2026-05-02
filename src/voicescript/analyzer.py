@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
+import logging
 from pathlib import Path
 from typing import Iterable
 
@@ -23,6 +25,9 @@ from .schemas import (
 from .parsers import parse_ffprobe_metadata, parse_silencedetect_output, parse_volumedetect_output
 
 
+logger = logging.getLogger("uvicorn.error")
+
+
 class ForensicAnalyzer:
     def __init__(
         self,
@@ -43,20 +48,50 @@ class ForensicAnalyzer:
             **self.demucs_separator.readiness(),
         }
 
-    def analyze_file(self, path: Path) -> ForensicReport:
+    def analyze_file(self, path: Path, *, run_id: str | None = None) -> ForensicReport:
         path = Path(path)
-        metadata, silence, volume, channel_analysis, provenance = self._measure_core_audio(path)
+        run_id = run_id or f"direct:{path.name}"
+        self._log_stage(run_id, "input", "received", f"file={path.name} path={path} bytes={_file_size(path)}")
+        metadata, silence, volume, channel_analysis, provenance = self._measure_core_audio(path, run_id=run_id)
+
+        self._log_stage(
+            run_id,
+            "source_separation",
+            "start",
+            f"provider={getattr(self.demucs_separator, 'provider_name', self.demucs_separator.__class__.__name__)}",
+        )
         source_separation = self.demucs_separator.separate_vocals(
             path,
             self.settings.data_dir / "demucs" / path.stem,
         )
-        speech_input = Path(source_separation.vocals_path) if source_separation.vocals_path else path
-        speech = self.speech_analyzer.analyze(speech_input)
+        self._log_stage(
+            run_id,
+            "source_separation",
+            "done",
+            f"available={source_separation.available} enabled={source_separation.enabled} "
+            f"vocals_path={source_separation.vocals_path or ''} limitations={len(source_separation.limitations)}",
+        )
 
-        return build_report_from_measurements(
+        speech_input = Path(source_separation.vocals_path) if source_separation.vocals_path else path
+        self._log_stage(run_id, "speech", "start", f"input={speech_input}")
+        speech = self.speech_analyzer.analyze(speech_input)
+        self._log_stage(
+            run_id,
+            "speech",
+            "done",
+            f"transcript_chars={len(speech.transcript_text)} speaker_segments={len(speech.speaker_segments)} "
+            f"limitations={len(speech.limitations)}",
+        )
+
+        self._log_stage(run_id, "hash", "start", f"file={path.name}")
+        sha256 = sha256_file(path)
+        self._log_stage(run_id, "hash", "done", f"sha256={sha256[:12]}...")
+
+        self._log_stage(run_id, "report", "start", "building forensic report")
+        report = build_report_from_measurements(
             file_name=metadata.file_name or path.name,
             source_path=str(path),
-            sha256=sha256_file(path),
+            sha256=sha256,
             metadata=metadata,
             silence=silence,
             volume=volume,
@@ -67,6 +102,13 @@ class ForensicAnalyzer:
             extra_limitations=speech.limitations,
             source_separation=source_separation,
         )
+        self._log_stage(
+            run_id,
+            "report",
+            "done",
+            f"issues={len(report.issues)} indicators={len(report.tamper_indicators)} limitations={len(report.limitations)}",
+        )
+        return report
 
     def analyze_batch(self, paths: Iterable[Path]) -> dict[str, object]:
         reports: list[ForensicReport] = []
@@ -74,7 +116,7 @@ class ForensicAnalyzer:
         for raw_path in paths:
             path = Path(raw_path)
             try:
-                reports.append(self.analyze_file(path))
+                reports.append(_analyze_file_with_run_id(self, path, run_id=f"batch:{path.name}"))
             except Exception as exc:
                 failures.append({"file_name": path.name, "path": str(path), "error": str(exc)})
         return {
@@ -148,7 +190,10 @@ class ForensicAnalyzer:
 
     def detect_forensic_indicators(self, path: Path) -> list[dict[str, object]]:
         path = Path(path)
-        metadata, silence, volume, channel_analysis, provenance = self._measure_core_audio(path)
+        metadata, silence, volume, channel_analysis, provenance = self._measure_core_audio(
+            path,
+            run_id=f"indicators:{path.name}",
+        )
         report = build_report_from_measurements(
             file_name=metadata.file_name or path.name,
             source_path=str(path),
@@ -180,28 +225,65 @@ class ForensicAnalyzer:
     def _measure_core_audio(
         self,
         path: Path,
+        *,
+        run_id: str,
     ) -> tuple[AudioMetadata, SilenceSummary, VolumeStats, ChannelAnalysis, list[CommandProvenance]]:
         provenance: list[CommandProvenance] = []
 
+        self._log_stage(run_id, "ffprobe", "start", f"file={path.name}")
         metadata_result = self.ffmpeg_tools.ffprobe_metadata(path)
         provenance.append(self.ffmpeg_tools.provenance("ffprobe", metadata_result))
         metadata = parse_ffprobe_metadata(metadata_result.stdout)
+        self._log_stage(
+            run_id,
+            "ffprobe",
+            "done",
+            f"duration={metadata.duration_seconds} sample_rate={metadata.sample_rate} "
+            f"channels={metadata.channels} streams={metadata.audio_streams}",
+        )
 
+        self._log_stage(run_id, "silence", "start", f"threshold={self.settings.silence_noise_db}")
         silence_result = self.ffmpeg_tools.detect_silence(path)
         provenance.append(self.ffmpeg_tools.provenance("ffmpeg silencedetect", silence_result))
         silence = parse_silencedetect_output(
             silence_result.stderr,
             duration_seconds=metadata.duration_seconds,
         )
+        self._log_stage(
+            run_id,
+            "silence",
+            "done",
+            f"segments={len(silence.segments)} ratio={silence.silence_ratio}",
+        )
 
+        self._log_stage(run_id, "volume", "start", "running volumedetect")
         volume_result = self.ffmpeg_tools.detect_volume(path)
         provenance.append(self.ffmpeg_tools.provenance("ffmpeg volumedetect", volume_result))
         volume = parse_volumedetect_output(
             volume_result.stderr,
             low_volume_threshold_db=self.settings.low_volume_threshold_db,
         )
+        self._log_stage(
+            run_id,
+            "volume",
+            "done",
+            f"avg_db={volume.avg_volume_db} max_db={volume.max_volume_db} clipping={volume.clipping_detected}",
+        )
 
-        return metadata, silence, volume, estimate_channel_setup(metadata), provenance
+        self._log_stage(run_id, "channels", "start", "estimating channel and microphone indicators")
+        channel_analysis = estimate_channel_setup(metadata)
+        self._log_stage(
+            run_id,
+            "channels",
+            "done",
+            f"measured={channel_analysis.measured_channels} mic_estimate={channel_analysis.estimated_microphone_count} "
+            f"confidence={channel_analysis.confidence}",
+        )
+
+        return metadata, silence, volume, channel_analysis, provenance
+
+    def _log_stage(self, run_id: str, stage: str, status: str, detail: str) -> None:
+        logger.info("pipeline run_id=%s stage=%s status=%s %s", run_id, stage, status, detail)
 
 
 def estimate_channel_setup(metadata: AudioMetadata) -> ChannelAnalysis:
@@ -289,6 +371,23 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return Path(path).stat().st_size
+    except OSError:
+        return 0
+
+
+def _analyze_file_with_run_id(analyzer: ForensicAnalyzer, path: Path, *, run_id: str) -> ForensicReport:
+    try:
+        parameters = inspect.signature(analyzer.analyze_file).parameters
+    except (TypeError, ValueError):
+        return analyzer.analyze_file(path)
+    if "run_id" in parameters:
+        return analyzer.analyze_file(path, run_id=run_id)
+    return analyzer.analyze_file(path)
 
 
 def _unknown_metadata(file_name: str) -> AudioMetadata:

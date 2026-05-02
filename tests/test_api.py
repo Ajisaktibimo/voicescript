@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 import shutil
 import uuid
 
@@ -125,6 +126,31 @@ def test_analyze_endpoint_returns_report_without_polling_job_id(client):
     assert payload["file_name"] == "instant.wav"
     assert payload["sha256"] == "feedface"
     assert "job_id" not in payload
+
+
+def test_analyze_endpoint_logs_upload_and_report_pipeline_stages(runtime_dir, caplog):
+    settings = Settings(
+        data_dir=runtime_dir / "data",
+        api_key="secret",
+        inline_jobs=True,
+    )
+    analyzer = RunIdRecordingAnalyzer()
+    test_client = TestClient(create_app(settings=settings, analyzer=analyzer))
+
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        response = test_client.post(
+            "/v1/analyze",
+            headers={"X-API-Key": "secret"},
+            files={"file": ("instant.wav", b"audio-bytes", "audio/wav")},
+        )
+
+    assert response.status_code == 200
+    assert analyzer.run_ids and analyzer.run_ids[0]
+    run_id = analyzer.run_ids[0]
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(f"pipeline run_id={run_id} stage=upload status=done" in message for message in messages)
+    assert any(f"pipeline run_id={run_id} stage=report_persist status=done" in message for message in messages)
+    test_client.close()
 
 
 def test_analyze_endpoint_requires_api_key(client):
@@ -266,3 +292,12 @@ class SometimesFailingAnalyzer(FakeAnalyzer):
 class AlwaysFailingAnalyzer(FakeAnalyzer):
     def analyze_file(self, path: Path):
         raise RuntimeError("decode failed")
+
+
+class RunIdRecordingAnalyzer(FakeAnalyzer):
+    def __init__(self):
+        self.run_ids: list[str] = []
+
+    def analyze_file(self, path: Path, *, run_id: str | None = None):
+        self.run_ids.append(run_id or "")
+        return super().analyze_file(path)

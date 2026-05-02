@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import inspect
 import uuid
 from pathlib import Path
 from typing import Annotated
@@ -76,9 +77,22 @@ def create_app(
         analysis_id = uuid.uuid4().hex
         source_path = await _save_upload_with_limit(storage, analysis_id, file, settings.max_upload_size_bytes)
         logger.info("Starting inline analysis %s for %s", analysis_id, file.filename or source_path.name)
+        logger.info(
+            "pipeline run_id=%s stage=upload status=done file=%s path=%s bytes=%s",
+            analysis_id,
+            file.filename or source_path.name,
+            source_path,
+            _file_size(source_path),
+        )
         try:
-            report = analyzer.analyze_file(source_path)
+            report = _analyze_file(analyzer, source_path, run_id=analysis_id)
+            logger.info("pipeline run_id=%s stage=report_persist status=start", analysis_id)
             storage.write_report(analysis_id, report)
+            logger.info(
+                "pipeline run_id=%s stage=report_persist status=done path=%s",
+                analysis_id,
+                storage.report_dir / f"{analysis_id}.json",
+            )
         except Exception as exc:
             logger.exception("Inline analysis %s failed for %s", analysis_id, file.filename or source_path.name)
             raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}") from exc
@@ -226,6 +240,23 @@ def _remove_upload_path(path: Path) -> None:
         pass
 
 
+def _file_size(path: Path) -> int:
+    try:
+        return Path(path).stat().st_size
+    except OSError:
+        return 0
+
+
+def _analyze_file(analyzer: ForensicAnalyzer, source_path: Path, *, run_id: str) -> ForensicReport:
+    try:
+        parameters = inspect.signature(analyzer.analyze_file).parameters
+    except (TypeError, ValueError):
+        return analyzer.analyze_file(source_path)
+    if "run_id" in parameters:
+        return analyzer.analyze_file(source_path, run_id=run_id)
+    return analyzer.analyze_file(source_path)
+
+
 def _batch_status(jobs: list[dict[str, object]]) -> str:
     statuses = {job["status"] for job in jobs}
     if any(status == "failed" for status in statuses):
@@ -246,9 +277,18 @@ def _process_job(
 ) -> None:
     try:
         logger.info("Starting job %s for %s", job_id, source_path.name)
+        logger.info(
+            "pipeline run_id=%s stage=upload status=done file=%s path=%s bytes=%s",
+            job_id,
+            source_path.name,
+            source_path,
+            _file_size(source_path),
+        )
         job_store.update_job(job_id, status="running", stage="analyzing")
-        report = analyzer.analyze_file(source_path)
+        report = _analyze_file(analyzer, source_path, run_id=job_id)
+        logger.info("pipeline run_id=%s stage=report_persist status=start", job_id)
         report_path = storage.write_report(job_id, report)
+        logger.info("pipeline run_id=%s stage=report_persist status=done path=%s", job_id, report_path)
         job_store.update_job(job_id, status="completed", stage="completed", report_path=report_path)
         logger.info("Completed job %s for %s", job_id, source_path.name)
     except Exception as exc:

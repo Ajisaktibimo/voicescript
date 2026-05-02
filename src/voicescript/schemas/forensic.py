@@ -6,7 +6,7 @@ from pydantic import Field
 
 from .audio import AudioQuality, ChannelAnalysis, SilenceSegment
 from .base import Confidence, JsonModel, Severity
-from .speech import SpeakerSegment
+from .speech import DiarizationResult, SpeakerSegment, TranscriptionResult
 from .tooling import CommandProvenance
 
 
@@ -58,6 +58,8 @@ class ForensicReport(JsonModel):
     audio_quality: AudioQuality
     transcript_text: str = ""
     speaker_segments: list[SpeakerSegment] = Field(default_factory=list)
+    transcription: TranscriptionResult = Field(default_factory=TranscriptionResult)
+    diarization: DiarizationResult = Field(default_factory=DiarizationResult)
     source_separation: SourceSeparationResult = Field(
         default_factory=lambda: SourceSeparationResult(
             available=False,

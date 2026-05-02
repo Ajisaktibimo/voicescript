@@ -16,6 +16,8 @@ from voicescript.schemas import (
     SpeechAnalysisResult,
     SpeakerSegment,
     ToolResult,
+    DiarizationResult,
+    TranscriptionResult,
     VolumeStats,
 )
 from voicescript.analysis import build_report_from_measurements
@@ -55,6 +57,8 @@ def test_demucs_vocals_path_is_used_for_speech_when_available(runtime_dir):
 
     assert speech.paths == [vocals]
     assert report.source_separation.vocals_path == str(vocals)
+    assert report.transcription.provider == "test-transcriber"
+    assert report.diarization.provider == "test-diarizer"
 
 
 def test_demucs_unavailable_falls_back_to_original_for_speech(runtime_dir):
@@ -225,6 +229,20 @@ class RecordingSpeechAnalyzer:
         self.paths.append(Path(path))
         return SpeechAnalysisResult(
             transcript_text="hello",
+            transcription=TranscriptionResult(
+                provider="test-transcriber",
+                output_type="fixture",
+                transcript_text="hello",
+            ),
+            diarization=DiarizationResult(
+                provider="test-diarizer",
+                output_type="fixture",
+                speaker_segments=[
+                    SpeakerSegment(speaker="SPEAKER_00", start_seconds=0, end_seconds=1, text="")
+                ],
+                estimated_speaker_count=1,
+                confidence="medium",
+            ),
             speaker_segments=[
                 SpeakerSegment(speaker="SPEAKER_00", start_seconds=0, end_seconds=1, text="hello")
             ],

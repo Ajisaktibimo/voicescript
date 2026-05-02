@@ -17,6 +17,7 @@ from voicescript.providers.speech import (
     create_speech_analyzer,
     _resolve_onnx_model,
 )
+from voicescript.schemas import DiarizationResult, TranscriptionResult
 
 
 def test_settings_loads_provider_selection_from_env_file(runtime_dir, monkeypatch):
@@ -59,6 +60,24 @@ def test_speech_analyzer_can_be_composed_from_disabled_providers():
     assert result.speaker_segments == []
     assert "Transcription disabled" in result.limitations[0]
     assert "Diarization disabled" in result.limitations[1]
+
+
+def test_disabled_speech_providers_return_normalized_pydantic_results():
+    transcription = DisabledTranscriber().transcribe(Path("court.wav"))
+    diarization = DisabledDiarizer().diarize(Path("court.wav"))
+
+    assert isinstance(transcription, TranscriptionResult)
+    assert transcription.provider == "disabled"
+    assert transcription.output_type == "none"
+    assert transcription.transcript_segments == []
+    assert transcription.limitations == ["Transcription disabled by provider configuration."]
+
+    assert isinstance(diarization, DiarizationResult)
+    assert diarization.provider == "disabled"
+    assert diarization.output_type == "none"
+    assert diarization.speaker_segments == []
+    assert diarization.estimated_speaker_count is None
+    assert diarization.limitations == ["Diarization disabled by provider configuration."]
 
 
 @pytest.mark.parametrize(
@@ -163,10 +182,13 @@ def test_local_pyannote_diarizer_returns_limitation_when_audio_loading_fails(mon
 
     diarizer = LocalPyannoteDiarizer(Settings(pyannote_auth_token="token"))
 
-    segments, limitations = diarizer.diarize(Path("court.wav"))
+    result = diarizer.diarize(Path("court.wav"))
 
-    assert segments == []
-    assert any("Diarization failed" in limitation for limitation in limitations)
+    assert isinstance(result, DiarizationResult)
+    assert result.provider == "local-pyannote"
+    assert result.output_type == "error"
+    assert result.speaker_segments == []
+    assert any("Diarization failed" in limitation for limitation in result.limitations)
 
 
 def test_local_pyannote_diarizer_returns_limitation_for_unsupported_output(monkeypatch):
@@ -180,10 +202,36 @@ def test_local_pyannote_diarizer_returns_limitation_for_unsupported_output(monke
 
     diarizer = LocalPyannoteDiarizer(Settings(pyannote_auth_token="token"))
 
-    segments, limitations = diarizer.diarize(Path("court.wav"))
+    result = diarizer.diarize(Path("court.wav"))
 
-    assert segments == []
-    assert any("unsupported output type DiarizeOutput" in limitation for limitation in limitations)
+    assert isinstance(result, DiarizationResult)
+    assert result.provider == "local-pyannote"
+    assert result.output_type == "DiarizeOutput"
+    assert result.speaker_segments == []
+    assert result.estimated_speaker_count is None
+    assert "Raw diarization output type: DiarizeOutput." in result.evidence
+    assert any("unsupported output type DiarizeOutput" in limitation for limitation in result.limitations)
+
+
+def test_local_pyannote_diarizer_normalizes_segment_sequence_output(monkeypatch):
+    pyannote_module = types.ModuleType("pyannote")
+    pyannote_audio_module = types.ModuleType("pyannote.audio")
+    pyannote_audio_module.Pipeline = _SequenceOutputPipeline
+
+    monkeypatch.setattr("voicescript.providers.speech._module_status", lambda *args, **kwargs: {"available": True, "detail": "available"})
+    monkeypatch.setitem(sys.modules, "pyannote", pyannote_module)
+    monkeypatch.setitem(sys.modules, "pyannote.audio", pyannote_audio_module)
+
+    diarizer = LocalPyannoteDiarizer(Settings(pyannote_auth_token="token"))
+
+    result = diarizer.diarize(Path("court.wav"))
+
+    assert isinstance(result, DiarizationResult)
+    assert result.output_type == "SequenceOutput"
+    assert result.estimated_speaker_count == 2
+    assert [segment.speaker for segment in result.speaker_segments] == ["SPEAKER_00", "SPEAKER_01"]
+    assert [segment.start_seconds for segment in result.speaker_segments] == [0.0, 2.0]
+    assert "Normalized 2 diarization segment(s)." in result.evidence
 
 
 def test_onnx_speech_providers_report_missing_local_models_without_network(monkeypatch, runtime_dir):
@@ -306,3 +354,19 @@ class _UnsupportedOutputPipeline:
 
     def __call__(self, payload):
         return DiarizeOutput()
+
+
+class SequenceOutput:
+    speaker_diarization = [
+        {"start": 2, "end": 3, "speaker": " SPEAKER_01 "},
+        {"start": 0, "end": 1.5, "speaker": "SPEAKER_00"},
+    ]
+
+
+class _SequenceOutputPipeline:
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        return cls()
+
+    def __call__(self, payload):
+        return SequenceOutput()

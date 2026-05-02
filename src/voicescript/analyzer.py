@@ -101,6 +101,8 @@ class ForensicAnalyzer:
             provenance=provenance,
             extra_limitations=speech.limitations,
             source_separation=source_separation,
+            transcription=speech.transcription,
+            diarization=speech.diarization,
         )
         self._log_stage(
             run_id,
@@ -177,6 +179,8 @@ class ForensicAnalyzer:
             transcript_text=speech.transcript_text,
             provenance=[],
             extra_limitations=speech.limitations,
+            transcription=speech.transcription,
+            diarization=speech.diarization,
         )
         return to_jsonable(report.estimated_speaker_count)
 

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Protocol
 
 from voicescript.config import Settings
-from voicescript.schemas import SpeakerSegment, SpeechAnalysisResult, TranscriptSegment
+from voicescript.schemas import DiarizationResult, SpeakerSegment, SpeechAnalysisResult, TranscriptionResult, TranscriptSegment
 
 
 ALLOWED_PROVIDER_NAMES = ("api", "disabled", "huggingface", "local", "local-onnx", "onnx", "other")
@@ -17,7 +17,7 @@ class TranscriptionProvider(Protocol):
     def readiness(self) -> dict[str, dict[str, str | bool]]:
         ...
 
-    def transcribe(self, input_file: Path) -> tuple[list[TranscriptSegment], list[str]]:
+    def transcribe(self, input_file: Path) -> TranscriptionResult:
         ...
 
 
@@ -27,7 +27,7 @@ class DiarizationProvider(Protocol):
     def readiness(self) -> dict[str, dict[str, str | bool]]:
         ...
 
-    def diarize(self, input_file: Path) -> tuple[list[SpeakerSegment], list[str]]:
+    def diarize(self, input_file: Path) -> DiarizationResult:
         ...
 
 
@@ -40,8 +40,12 @@ class DisabledTranscriber:
             "faster_whisper": {"available": False, "detail": "disabled"},
         }
 
-    def transcribe(self, input_file: Path) -> tuple[list[TranscriptSegment], list[str]]:
-        return [], ["Transcription disabled by provider configuration."]
+    def transcribe(self, input_file: Path) -> TranscriptionResult:
+        return _transcription_result(
+            provider=self.provider_name,
+            output_type="none",
+            limitations=["Transcription disabled by provider configuration."],
+        )
 
 
 class DisabledDiarizer:
@@ -53,8 +57,12 @@ class DisabledDiarizer:
             "pyannote.audio": {"available": False, "detail": "disabled"},
         }
 
-    def diarize(self, input_file: Path) -> tuple[list[SpeakerSegment], list[str]]:
-        return [], ["Diarization disabled by provider configuration."]
+    def diarize(self, input_file: Path) -> DiarizationResult:
+        return _diarization_result(
+            provider=self.provider_name,
+            output_type="none",
+            limitations=["Diarization disabled by provider configuration."],
+        )
 
 
 class UnavailableTranscriber:
@@ -70,11 +78,15 @@ class UnavailableTranscriber:
             }
         }
 
-    def transcribe(self, input_file: Path) -> tuple[list[TranscriptSegment], list[str]]:
-        return [], [
-            f"Provider '{self.provider_name}' is selected but no offline transcription adapter is configured; "
-            "no network call was attempted."
-        ]
+    def transcribe(self, input_file: Path) -> TranscriptionResult:
+        return _transcription_result(
+            provider=self.provider_name,
+            output_type="none",
+            limitations=[
+                f"Provider '{self.provider_name}' is selected but no offline transcription adapter is configured; "
+                "no network call was attempted."
+            ],
+        )
 
 
 class UnavailableDiarizer:
@@ -90,11 +102,15 @@ class UnavailableDiarizer:
             }
         }
 
-    def diarize(self, input_file: Path) -> tuple[list[SpeakerSegment], list[str]]:
-        return [], [
-            f"Provider '{self.provider_name}' is selected but no offline diarization adapter is configured; "
-            "no network call was attempted."
-        ]
+    def diarize(self, input_file: Path) -> DiarizationResult:
+        return _diarization_result(
+            provider=self.provider_name,
+            output_type="none",
+            limitations=[
+                f"Provider '{self.provider_name}' is selected but no offline diarization adapter is configured; "
+                "no network call was attempted."
+            ],
+        )
 
 
 class LocalWhisperTranscriber:
@@ -114,10 +130,15 @@ class LocalWhisperTranscriber:
             "faster_whisper": status,
         }
 
-    def transcribe(self, input_file: Path) -> tuple[list[TranscriptSegment], list[str]]:
+    def transcribe(self, input_file: Path) -> TranscriptionResult:
         status = _module_status("faster_whisper")
         if not status["available"]:
-            return [], ["Transcription skipped because faster-whisper is not installed."]
+            return _transcription_result(
+                provider=self.provider_name,
+                model=self.settings.whisper_model,
+                output_type="none",
+                limitations=["Transcription skipped because faster-whisper is not installed."],
+            )
 
         from faster_whisper import WhisperModel
 
@@ -127,14 +148,19 @@ class LocalWhisperTranscriber:
             compute_type=self.settings.whisper_compute_type,
         )
         segments, _info = model.transcribe(str(input_file), vad_filter=True)
-        return [
-            TranscriptSegment(
-                start_seconds=float(segment.start),
-                end_seconds=float(segment.end),
-                text=segment.text.strip(),
-            )
-            for segment in segments
-        ], []
+        return _transcription_result(
+            provider=self.provider_name,
+            model=self.settings.whisper_model,
+            output_type=type(segments).__name__,
+            transcript_segments=[
+                TranscriptSegment(
+                    start_seconds=float(segment.start),
+                    end_seconds=float(segment.end),
+                    text=segment.text.strip(),
+                )
+                for segment in segments
+            ],
+        )
 
 
 class LocalOnnxWhisperTranscriber:
@@ -161,10 +187,15 @@ class LocalOnnxWhisperTranscriber:
             "onnxruntime": runtime_status,
         }
 
-    def transcribe(self, input_file: Path) -> tuple[list[TranscriptSegment], list[str]]:
+    def transcribe(self, input_file: Path) -> TranscriptionResult:
         runtime_status = _module_status("onnxruntime")
         if not runtime_status["available"]:
-            return [], ["ONNX transcription skipped because onnxruntime is not installed."]
+            return _transcription_result(
+                provider=self.provider_name,
+                model=self.settings.whisper_onnx_model,
+                output_type="none",
+                limitations=["ONNX transcription skipped because onnxruntime is not installed."],
+            )
 
         model_path, limitations = _resolve_onnx_model(
             self.settings,
@@ -173,12 +204,23 @@ class LocalOnnxWhisperTranscriber:
             kind="whisper",
         )
         if not model_path:
-            return [], limitations
+            return _transcription_result(
+                provider=self.provider_name,
+                model=self.settings.whisper_onnx_model,
+                output_type="none",
+                limitations=limitations,
+            )
 
-        return [], [
-            f"ONNX transcription inference is not implemented yet for model '{model_path}'. "
-            "Model resolution succeeded; add a Whisper ONNX tokenizer/preprocessor adapter before relying on transcript output."
-        ]
+        return _transcription_result(
+            provider=self.provider_name,
+            model=str(model_path),
+            output_type="onnx",
+            limitations=[
+                f"ONNX transcription inference is not implemented yet for model '{model_path}'. "
+                "Model resolution succeeded; add a Whisper ONNX tokenizer/preprocessor adapter before relying on transcript output."
+            ],
+            evidence=[f"Resolved ONNX transcription model at {model_path}."],
+        )
 
 
 class LocalPyannoteDiarizer:
@@ -198,12 +240,22 @@ class LocalPyannoteDiarizer:
             "pyannote.audio": status,
         }
 
-    def diarize(self, input_file: Path) -> tuple[list[SpeakerSegment], list[str]]:
+    def diarize(self, input_file: Path) -> DiarizationResult:
         status = _module_status("pyannote.audio", needs_token=True, token=self.settings.pyannote_auth_token)
         if not status["available"]:
-            return [], ["Diarization skipped because pyannote.audio is not installed."]
+            return _diarization_result(
+                provider=self.provider_name,
+                model=self.settings.pyannote_model,
+                output_type="none",
+                limitations=["Diarization skipped because pyannote.audio is not installed."],
+            )
         if not self.settings.pyannote_auth_token:
-            return [], ["Diarization skipped because PYANNOTE_AUTH_TOKEN is not configured."]
+            return _diarization_result(
+                provider=self.provider_name,
+                model=self.settings.pyannote_model,
+                output_type="none",
+                limitations=["Diarization skipped because PYANNOTE_AUTH_TOKEN is not configured."],
+            )
 
         try:
             from pyannote.audio import Pipeline
@@ -214,9 +266,23 @@ class LocalPyannoteDiarizer:
             )
             diarization = pipeline(str(input_file))
         except Exception as exc:
-            return [], [f"Diarization failed in local pyannote provider: {exc}"]
+            return _diarization_result(
+                provider=self.provider_name,
+                model=self.settings.pyannote_model,
+                output_type="error",
+                limitations=[f"Diarization failed in local pyannote provider: {exc}"],
+            )
 
-        return _parse_pyannote_diarization(diarization)
+        output_type = type(diarization).__name__
+        segments, limitations = _parse_pyannote_diarization(diarization)
+        return _diarization_result(
+            provider=self.provider_name,
+            model=self.settings.pyannote_model,
+            output_type=output_type,
+            speaker_segments=segments,
+            limitations=limitations,
+            evidence=[f"Raw diarization output type: {output_type}."],
+        )
 
 
 def _parse_pyannote_diarization(diarization: object) -> tuple[list[SpeakerSegment], list[str]]:
@@ -312,6 +378,102 @@ def _is_unsupported_output_limitation(limitations: list[str]) -> bool:
     return bool(limitations) and "unsupported output type" in limitations[0]
 
 
+def _transcription_result(
+    *,
+    provider: str,
+    model: str | None = None,
+    output_type: str,
+    transcript_segments: list[TranscriptSegment] | None = None,
+    limitations: list[str] | None = None,
+    evidence: list[str] | None = None,
+) -> TranscriptionResult:
+    normalized_segments = _normalize_transcript_segments(transcript_segments or [])
+    transcript_text = " ".join(segment.text for segment in normalized_segments if segment.text)
+    normalized_evidence = list(evidence or [])
+    if normalized_segments:
+        normalized_evidence.append(f"Normalized {len(normalized_segments)} transcript segment(s).")
+    return TranscriptionResult(
+        provider=provider,
+        model=model,
+        output_type=output_type,
+        transcript_text=transcript_text,
+        transcript_segments=normalized_segments,
+        confidence="medium" if normalized_segments else "unknown",
+        limitations=limitations or [],
+        evidence=normalized_evidence,
+    )
+
+
+def _diarization_result(
+    *,
+    provider: str,
+    model: str | None = None,
+    output_type: str,
+    speaker_segments: list[SpeakerSegment] | None = None,
+    limitations: list[str] | None = None,
+    evidence: list[str] | None = None,
+) -> DiarizationResult:
+    normalized_segments = _normalize_speaker_segments(speaker_segments or [])
+    speaker_count = _estimate_normalized_speaker_count(normalized_segments)
+    normalized_evidence = list(evidence or [])
+    if normalized_segments:
+        normalized_evidence.append(f"Normalized {len(normalized_segments)} diarization segment(s).")
+    return DiarizationResult(
+        provider=provider,
+        model=model,
+        output_type=output_type,
+        speaker_segments=normalized_segments,
+        estimated_speaker_count=speaker_count,
+        confidence="medium" if speaker_count else "unknown",
+        limitations=limitations or [],
+        evidence=normalized_evidence,
+    )
+
+
+def _normalize_transcript_segments(segments: list[TranscriptSegment]) -> list[TranscriptSegment]:
+    normalized: list[TranscriptSegment] = []
+    for segment in segments:
+        start = max(0.0, float(segment.start_seconds))
+        end = max(start, float(segment.end_seconds))
+        text = segment.text.strip()
+        speaker = segment.speaker.strip() if segment.speaker else None
+        normalized.append(
+            TranscriptSegment(
+                start_seconds=start,
+                end_seconds=end,
+                text=text,
+                speaker=speaker,
+            )
+        )
+    return sorted(normalized, key=lambda item: (item.start_seconds, item.end_seconds, item.text))
+
+
+def _normalize_speaker_segments(segments: list[SpeakerSegment]) -> list[SpeakerSegment]:
+    normalized: list[SpeakerSegment] = []
+    for segment in segments:
+        start = max(0.0, float(segment.start_seconds))
+        end = max(start, float(segment.end_seconds))
+        speaker = segment.speaker.strip() or "UNKNOWN"
+        normalized.append(
+            SpeakerSegment(
+                speaker=speaker,
+                start_seconds=start,
+                end_seconds=end,
+                text=segment.text.strip(),
+            )
+        )
+    return sorted(normalized, key=lambda item: (item.start_seconds, item.end_seconds, item.speaker))
+
+
+def _estimate_normalized_speaker_count(segments: list[SpeakerSegment]) -> int | None:
+    speakers = {
+        segment.speaker
+        for segment in segments
+        if segment.speaker.strip() and segment.speaker.strip().upper() != "UNKNOWN"
+    }
+    return len(speakers) if speakers else None
+
+
 class LocalOnnxDiarizer:
     provider_name = "local-onnx-diarization"
 
@@ -336,10 +498,15 @@ class LocalOnnxDiarizer:
             "onnxruntime": runtime_status,
         }
 
-    def diarize(self, input_file: Path) -> tuple[list[SpeakerSegment], list[str]]:
+    def diarize(self, input_file: Path) -> DiarizationResult:
         runtime_status = _module_status("onnxruntime")
         if not runtime_status["available"]:
-            return [], ["ONNX diarization skipped because onnxruntime is not installed."]
+            return _diarization_result(
+                provider=self.provider_name,
+                model=self.settings.pyannote_onnx_model,
+                output_type="none",
+                limitations=["ONNX diarization skipped because onnxruntime is not installed."],
+            )
 
         model_path, limitations = _resolve_onnx_model(
             self.settings,
@@ -348,12 +515,23 @@ class LocalOnnxDiarizer:
             kind="pyannote",
         )
         if not model_path:
-            return [], limitations
+            return _diarization_result(
+                provider=self.provider_name,
+                model=self.settings.pyannote_onnx_model,
+                output_type="none",
+                limitations=limitations,
+            )
 
-        return [], [
-            f"ONNX diarization inference is not implemented yet for model '{model_path}'. "
-            "Pyannote-style ONNX diarization still needs segmentation, embedding, and clustering glue."
-        ]
+        return _diarization_result(
+            provider=self.provider_name,
+            model=str(model_path),
+            output_type="onnx",
+            limitations=[
+                f"ONNX diarization inference is not implemented yet for model '{model_path}'. "
+                "Pyannote-style ONNX diarization still needs segmentation, embedding, and clustering glue."
+            ],
+            evidence=[f"Resolved ONNX diarization model at {model_path}."],
+        )
 
 
 class SpeechAnalyzer:
@@ -365,17 +543,24 @@ class SpeechAnalyzer:
         return {**self.transcriber.readiness(), **self.diarizer.readiness()}
 
     def analyze(self, input_file: Path) -> SpeechAnalysisResult:
-        transcript_segments, transcription_limits = self.transcriber.transcribe(input_file)
-        diarization_segments, diarization_limits = self.diarizer.diarize(input_file)
-        speaker_segments = _align_transcript_to_speakers(transcript_segments, diarization_segments)
-        if diarization_segments and not transcript_segments:
-            speaker_segments = diarization_segments
-        transcript_text = " ".join(segment.text.strip() for segment in transcript_segments if segment.text.strip())
+        transcription = self.transcriber.transcribe(input_file)
+        diarization = self.diarizer.diarize(input_file)
+        speaker_segments = _align_transcript_to_speakers(
+            transcription.transcript_segments,
+            diarization.speaker_segments,
+        )
+        if diarization.speaker_segments and not transcription.transcript_segments:
+            speaker_segments = diarization.speaker_segments
+        transcript_text = transcription.transcript_text or " ".join(
+            segment.text.strip() for segment in transcription.transcript_segments if segment.text.strip()
+        )
         return SpeechAnalysisResult(
             transcript_text=transcript_text,
-            transcript_segments=transcript_segments,
+            transcript_segments=transcription.transcript_segments,
             speaker_segments=speaker_segments,
-            limitations=[*transcription_limits, *diarization_limits],
+            transcription=transcription,
+            diarization=diarization,
+            limitations=[*transcription.limitations, *diarization.limitations],
             readiness=self.readiness(),
         )
 

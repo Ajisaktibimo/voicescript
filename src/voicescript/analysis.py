@@ -7,12 +7,14 @@ from .models import (
     AudioQuality,
     ChannelAnalysis,
     CommandProvenance,
+    DiarizationResult,
     Estimate,
     ForensicFinding,
     ForensicReport,
     SilenceSummary,
     SourceSeparationResult,
     SpeakerSegment,
+    TranscriptionResult,
     VolumeStats,
 )
 
@@ -35,6 +37,8 @@ def build_report_from_measurements(
     source_path: str | None = None,
     extra_limitations: list[str] | None = None,
     source_separation: SourceSeparationResult | dict[str, object] | None = None,
+    transcription: TranscriptionResult | dict[str, object] | None = None,
+    diarization: DiarizationResult | dict[str, object] | None = None,
 ) -> ForensicReport:
     estimated_speaker_count = _estimate_speaker_count(speaker_segments)
     estimated_microphone_count = Estimate(
@@ -55,6 +59,8 @@ def build_report_from_measurements(
     if extra_limitations:
         limitations.extend(extra_limitations)
     separation = _coerce_source_separation(source_separation)
+    transcription_result = _coerce_transcription(transcription)
+    diarization_result = _coerce_diarization(diarization)
     limitations.extend(separation.limitations)
 
     evidence_trail = [
@@ -92,6 +98,8 @@ def build_report_from_measurements(
         ),
         transcript_text=transcript_text,
         speaker_segments=speaker_segments,
+        transcription=transcription_result,
+        diarization=diarization_result,
         source_separation=separation,
         tamper_indicators=findings,
         issues=issues,
@@ -118,6 +126,22 @@ def _coerce_source_separation(value: SourceSeparationResult | dict[str, object] 
         enabled=True,
         limitations=["Demucs source separation was not run."],
     )
+
+
+def _coerce_transcription(value: TranscriptionResult | dict[str, object] | None) -> TranscriptionResult:
+    if isinstance(value, TranscriptionResult):
+        return value
+    if isinstance(value, dict):
+        return TranscriptionResult.model_validate(value)
+    return TranscriptionResult()
+
+
+def _coerce_diarization(value: DiarizationResult | dict[str, object] | None) -> DiarizationResult:
+    if isinstance(value, DiarizationResult):
+        return value
+    if isinstance(value, dict):
+        return DiarizationResult.model_validate(value)
+    return DiarizationResult()
 
 
 def _estimate_speaker_count(segments: list[SpeakerSegment]) -> Estimate:

@@ -15,7 +15,7 @@ from .forensic import (
     ForensicReport,
     SourceSeparationResult,
 )
-from .speech import SpeakerSegment, SpeechAnalysisResult, TranscriptSegment
+from .speech import DiarizationResult, SpeakerSegment, SpeechAnalysisResult, TranscriptionResult, TranscriptSegment
 from .tooling import CommandProvenance, ToolResult
 
 __all__ = [
@@ -25,6 +25,7 @@ __all__ = [
     "ChannelAnalysis",
     "CommandProvenance",
     "Confidence",
+    "DiarizationResult",
     "Estimate",
     "ForensicFinding",
     "ForensicProfile",
@@ -37,6 +38,7 @@ __all__ = [
     "SpeakerSegment",
     "SpeechAnalysisResult",
     "ToolResult",
+    "TranscriptionResult",
     "TranscriptSegment",
     "VolumeStats",
     "to_jsonable",

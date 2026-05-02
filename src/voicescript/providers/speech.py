@@ -8,7 +8,7 @@ from voicescript.config import Settings
 from voicescript.schemas import SpeakerSegment, SpeechAnalysisResult, TranscriptSegment
 
 
-ALLOWED_PROVIDER_NAMES = ("api", "disabled", "huggingface", "local", "other")
+ALLOWED_PROVIDER_NAMES = ("api", "disabled", "huggingface", "local", "local-onnx", "onnx", "other")
 
 
 class TranscriptionProvider(Protocol):
@@ -137,6 +137,50 @@ class LocalWhisperTranscriber:
         ], []
 
 
+class LocalOnnxWhisperTranscriber:
+    provider_name = "local-onnx-whisper"
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    def readiness(self) -> dict[str, dict[str, str | bool]]:
+        runtime_status = _module_status("onnxruntime")
+        model_path, limitations = _resolve_onnx_model(
+            self.settings,
+            self.settings.whisper_onnx_model,
+            self.settings.whisper_onnx_repo_id,
+            kind="whisper",
+        )
+        return {
+            "transcription": {
+                "available": bool(runtime_status["available"] and model_path),
+                "provider": self.provider_name,
+                "detail": "available" if model_path else "; ".join(limitations),
+                "model_path": str(model_path) if model_path else "",
+            },
+            "onnxruntime": runtime_status,
+        }
+
+    def transcribe(self, input_file: Path) -> tuple[list[TranscriptSegment], list[str]]:
+        runtime_status = _module_status("onnxruntime")
+        if not runtime_status["available"]:
+            return [], ["ONNX transcription skipped because onnxruntime is not installed."]
+
+        model_path, limitations = _resolve_onnx_model(
+            self.settings,
+            self.settings.whisper_onnx_model,
+            self.settings.whisper_onnx_repo_id,
+            kind="whisper",
+        )
+        if not model_path:
+            return [], limitations
+
+        return [], [
+            f"ONNX transcription inference is not implemented yet for model '{model_path}'. "
+            "Model resolution succeeded; add a Whisper ONNX tokenizer/preprocessor adapter before relying on transcript output."
+        ]
+
+
 class LocalPyannoteDiarizer:
     provider_name = "local-pyannote"
 
@@ -185,6 +229,50 @@ class LocalPyannoteDiarizer:
         return segments, []
 
 
+class LocalOnnxDiarizer:
+    provider_name = "local-onnx-diarization"
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    def readiness(self) -> dict[str, dict[str, str | bool]]:
+        runtime_status = _module_status("onnxruntime")
+        model_path, limitations = _resolve_onnx_model(
+            self.settings,
+            self.settings.pyannote_onnx_model,
+            self.settings.pyannote_onnx_repo_id,
+            kind="pyannote",
+        )
+        return {
+            "diarization": {
+                "available": bool(runtime_status["available"] and model_path),
+                "provider": self.provider_name,
+                "detail": "available" if model_path else "; ".join(limitations),
+                "model_path": str(model_path) if model_path else "",
+            },
+            "onnxruntime": runtime_status,
+        }
+
+    def diarize(self, input_file: Path) -> tuple[list[SpeakerSegment], list[str]]:
+        runtime_status = _module_status("onnxruntime")
+        if not runtime_status["available"]:
+            return [], ["ONNX diarization skipped because onnxruntime is not installed."]
+
+        model_path, limitations = _resolve_onnx_model(
+            self.settings,
+            self.settings.pyannote_onnx_model,
+            self.settings.pyannote_onnx_repo_id,
+            kind="pyannote",
+        )
+        if not model_path:
+            return [], limitations
+
+        return [], [
+            f"ONNX diarization inference is not implemented yet for model '{model_path}'. "
+            "Pyannote-style ONNX diarization still needs segmentation, embedding, and clustering glue."
+        ]
+
+
 class SpeechAnalyzer:
     def __init__(self, transcriber: TranscriptionProvider, diarizer: DiarizationProvider):
         self.transcriber = transcriber
@@ -222,6 +310,8 @@ def _create_transcriber(settings: Settings) -> TranscriptionProvider:
         return DisabledTranscriber()
     if provider == "local":
         return LocalWhisperTranscriber(settings)
+    if provider in {"onnx", "local-onnx"}:
+        return LocalOnnxWhisperTranscriber(settings)
     if provider in {"api", "huggingface", "other"}:
         return UnavailableTranscriber(provider)
     raise ValueError(
@@ -235,6 +325,8 @@ def _create_diarizer(settings: Settings) -> DiarizationProvider:
         return DisabledDiarizer()
     if provider == "local":
         return LocalPyannoteDiarizer(settings)
+    if provider in {"onnx", "local-onnx"}:
+        return LocalOnnxDiarizer(settings)
     if provider in {"api", "huggingface", "other"}:
         return UnavailableDiarizer(provider)
     raise ValueError(
@@ -248,6 +340,66 @@ def _normalise_provider(provider: str) -> str:
 
 def _allowed_provider_message() -> str:
     return f"Allowed values: {', '.join(ALLOWED_PROVIDER_NAMES)}."
+
+
+def _resolve_onnx_model(
+    settings: Settings,
+    model_reference: str,
+    repo_id: str | None,
+    *,
+    kind: str,
+    fetcher=None,
+) -> tuple[Path | None, list[str]]:
+    model_dir = _onnx_model_dir(settings)
+    candidate = Path(model_reference)
+    if not candidate.is_absolute():
+        candidate = model_dir / candidate
+    if candidate.exists():
+        return candidate, []
+
+    fetch_enabled = settings.onnx_fetch_enabled or settings.model_fetch_policy == "allow_download"
+    if not fetch_enabled:
+        return None, [
+            f"ONNX {kind} model is missing at {candidate}; model fetch is disabled "
+            f"(policy={settings.model_fetch_policy})."
+        ]
+    if not repo_id:
+        return None, [f"ONNX {kind} model fetch is enabled, but no Hugging Face repo id is configured."]
+
+    try:
+        fetched_path = _fetch_onnx_model(repo_id, model_dir, fetcher=fetcher)
+    except Exception as exc:
+        return None, [f"ONNX {kind} model fetch failed for repo '{repo_id}': {exc}"]
+
+    fetched_candidate = Path(fetched_path)
+    if fetched_candidate.is_file():
+        return fetched_candidate, []
+    nested_candidate = fetched_candidate / Path(model_reference).name
+    if nested_candidate.exists():
+        return nested_candidate, []
+    return None, [f"ONNX {kind} model fetch completed, but '{Path(model_reference).name}' was not found."]
+
+
+def _fetch_onnx_model(repo_id: str, cache_dir: Path, *, fetcher=None) -> Path:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    if fetcher is None:
+        from huggingface_hub import snapshot_download
+
+        fetcher = snapshot_download
+    return Path(
+        fetcher(
+            repo_id=repo_id,
+            cache_dir=str(cache_dir),
+            local_dir=str(cache_dir / repo_id.replace("/", "__")),
+        )
+    )
+
+
+def _onnx_model_dir(settings: Settings) -> Path:
+    default = Path("data/models")
+    if settings.onnx_model_dir == default and settings.model_cache_dir != default:
+        return settings.model_cache_dir
+    return settings.onnx_model_dir
 
 
 def _module_status(module_name: str, *, needs_token: bool = False, token: str | None = None) -> dict[str, str | bool]:

@@ -26,6 +26,15 @@ class Settings(BaseModel):
     whisper_compute_type: str = "int8"
     pyannote_model: str = "pyannote/speaker-diarization-3.1"
     pyannote_auth_token: str | None = None
+    model_fetch_policy: str = "local_only"
+    model_cache_dir: Path = Field(default=Path("data/models"))
+    onnx_model_dir: Path = Field(default=Path("data/models"))
+    onnx_fetch_enabled: bool = False
+    whisper_onnx_model: str = "whisper.onnx"
+    whisper_onnx_repo_id: str | None = None
+    pyannote_onnx_model: str = "pyannote.onnx"
+    pyannote_onnx_repo_id: str | None = None
+    onnx_execution_provider: str = "CPUExecutionProvider"
     demucs_enabled: bool = True
     demucs_model: str = "htdemucs"
 
@@ -41,6 +50,15 @@ class Settings(BaseModel):
         if require_api_key and not api_key:
             raise ValueError("VOICESCRIPT_API_KEY must be set; refusing to use a built-in default API key.")
         inline_jobs = _truthy(get("VOICESCRIPT_INLINE_JOBS", "false"))
+        model_fetch_policy = (get("VOICESCRIPT_MODEL_FETCH_POLICY", "") or "").lower()
+        onnx_fetch_enabled = _truthy(get("VOICESCRIPT_ONNX_FETCH_ENABLED"))
+        if not model_fetch_policy:
+            model_fetch_policy = "allow_download" if onnx_fetch_enabled else "local_only"
+        model_cache_dir = Path(
+            get("VOICESCRIPT_MODEL_CACHE_DIR")
+            or get("VOICESCRIPT_ONNX_MODEL_DIR")
+            or "data/models"
+        )
         settings = cls(
             data_dir=data_dir,
             api_key=api_key or "",
@@ -61,6 +79,16 @@ class Settings(BaseModel):
             pyannote_model=get("VOICESCRIPT_PYANNOTE_MODEL", "pyannote/speaker-diarization-3.1")
             or "pyannote/speaker-diarization-3.1",
             pyannote_auth_token=get("PYANNOTE_AUTH_TOKEN"),
+            model_fetch_policy=model_fetch_policy,
+            model_cache_dir=model_cache_dir,
+            onnx_model_dir=model_cache_dir,
+            onnx_fetch_enabled=onnx_fetch_enabled or model_fetch_policy == "allow_download",
+            whisper_onnx_model=get("VOICESCRIPT_WHISPER_ONNX_MODEL", "whisper.onnx") or "whisper.onnx",
+            whisper_onnx_repo_id=get("VOICESCRIPT_WHISPER_ONNX_REPO_ID"),
+            pyannote_onnx_model=get("VOICESCRIPT_PYANNOTE_ONNX_MODEL", "pyannote.onnx") or "pyannote.onnx",
+            pyannote_onnx_repo_id=get("VOICESCRIPT_PYANNOTE_ONNX_REPO_ID"),
+            onnx_execution_provider=get("VOICESCRIPT_ONNX_EXECUTION_PROVIDER", "CPUExecutionProvider")
+            or "CPUExecutionProvider",
             demucs_enabled=_truthy(get("VOICESCRIPT_DEMUCS_ENABLED", "true")),
             demucs_model=get("VOICESCRIPT_DEMUCS_MODEL", "htdemucs") or "htdemucs",
         )

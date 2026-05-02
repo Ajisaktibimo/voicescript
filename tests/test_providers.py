@@ -10,9 +10,12 @@ from voicescript.providers.separation import DisabledSourceSeparator, create_sou
 from voicescript.providers.speech import (
     DisabledDiarizer,
     DisabledTranscriber,
+    LocalOnnxDiarizer,
+    LocalOnnxWhisperTranscriber,
     LocalPyannoteDiarizer,
     SpeechAnalyzer,
     create_speech_analyzer,
+    _resolve_onnx_model,
 )
 
 
@@ -88,6 +91,19 @@ def test_provider_selection_accepts_supported_names(
     assert separator.provider_name == expected_separator
 
 
+def test_onnx_provider_selection_is_scoped_to_speech():
+    settings = Settings(
+        transcription_provider="onnx",
+        diarization_provider="onnx",
+        source_separation_provider="disabled",
+    )
+
+    speech = create_speech_analyzer(settings)
+
+    assert speech.transcriber.provider_name == "local-onnx-whisper"
+    assert speech.diarizer.provider_name == "local-onnx-diarization"
+
+
 @pytest.mark.parametrize("provider_name", ["huggingface", "api", "other"])
 def test_nonlocal_provider_selection_is_configured_without_network_calls(provider_name, runtime_dir):
     settings = Settings(
@@ -111,14 +127,15 @@ def test_nonlocal_provider_selection_is_configured_without_network_calls(provide
 
 
 def test_provider_selection_rejects_other_names():
-    allowed = "Allowed values: api, disabled, huggingface, local, other"
-    with pytest.raises(ValueError, match=allowed):
+    speech_allowed = "Allowed values: api, disabled, huggingface, local, local-onnx, onnx, other"
+    separation_allowed = "Allowed values: api, disabled, huggingface, local, other"
+    with pytest.raises(ValueError, match=speech_allowed):
         create_speech_analyzer(Settings(transcription_provider="openai"))
 
-    with pytest.raises(ValueError, match=allowed):
+    with pytest.raises(ValueError, match=speech_allowed):
         create_speech_analyzer(Settings(diarization_provider="cloudish"))
 
-    with pytest.raises(ValueError, match=allowed):
+    with pytest.raises(ValueError, match=separation_allowed):
         create_source_separator(Settings(source_separation_provider="demuc"))
 
 
@@ -150,6 +167,100 @@ def test_local_pyannote_diarizer_returns_limitation_when_audio_loading_fails(mon
 
     assert segments == []
     assert any("Diarization failed" in limitation for limitation in limitations)
+
+
+def test_onnx_speech_providers_report_missing_local_models_without_network(monkeypatch, runtime_dir):
+    monkeypatch.setattr("voicescript.providers.speech._module_status", lambda *args, **kwargs: {"available": True, "detail": "available"})
+    settings = Settings(
+        model_cache_dir=runtime_dir / "models",
+        transcription_provider="onnx",
+        diarization_provider="onnx",
+        whisper_onnx_model="missing-whisper.onnx",
+        pyannote_onnx_model="missing-pyannote.onnx",
+        model_fetch_policy="local_only",
+    )
+
+    speech = create_speech_analyzer(settings)
+    result = speech.analyze(Path("court.wav"))
+
+    assert isinstance(speech.transcriber, LocalOnnxWhisperTranscriber)
+    assert isinstance(speech.diarizer, LocalOnnxDiarizer)
+    assert speech.readiness()["onnxruntime"]["available"] is True
+    assert result.transcript_text == ""
+    assert result.speaker_segments == []
+    assert any("missing-whisper.onnx" in limitation for limitation in result.limitations)
+    assert any("missing-pyannote.onnx" in limitation for limitation in result.limitations)
+
+
+def test_onnx_speech_providers_use_existing_model_files(monkeypatch, runtime_dir):
+    monkeypatch.setattr("voicescript.providers.speech._module_status", lambda *args, **kwargs: {"available": True, "detail": "available"})
+    whisper_model = runtime_dir / "models" / "whisper.onnx"
+    diarization_model = runtime_dir / "models" / "diarization.onnx"
+    whisper_model.parent.mkdir(parents=True)
+    whisper_model.write_bytes(b"onnx")
+    diarization_model.write_bytes(b"onnx")
+    settings = Settings(
+        model_cache_dir=runtime_dir / "models",
+        transcription_provider="onnx",
+        diarization_provider="onnx",
+        whisper_onnx_model="whisper.onnx",
+        pyannote_onnx_model="diarization.onnx",
+        model_fetch_policy="local_only",
+    )
+
+    speech = create_speech_analyzer(settings)
+    readiness = speech.readiness()
+    result = speech.analyze(Path("court.wav"))
+
+    assert readiness["transcription"]["available"] is True
+    assert readiness["diarization"]["available"] is True
+    assert readiness["transcription"]["model_path"] == str(whisper_model)
+    assert readiness["diarization"]["model_path"] == str(diarization_model)
+    assert any("ONNX transcription inference is not implemented" in item for item in result.limitations)
+    assert any("ONNX diarization inference is not implemented" in item for item in result.limitations)
+
+
+def test_onnx_model_resolution_fetches_only_when_enabled(runtime_dir):
+    calls = []
+
+    def fake_fetcher(**kwargs):
+        calls.append(kwargs)
+        model_dir = runtime_dir / "fetched"
+        model_dir.mkdir()
+        (model_dir / "whisper.onnx").write_bytes(b"onnx")
+        return str(model_dir)
+
+    disabled_settings = Settings(
+        model_cache_dir=runtime_dir / "models-disabled",
+        model_fetch_policy="local_only",
+        onnx_fetch_enabled=False,
+    )
+    missing_path, limitations = _resolve_onnx_model(
+        disabled_settings,
+        "whisper.onnx",
+        "voicescript/whisper-onnx",
+        kind="whisper",
+        fetcher=fake_fetcher,
+    )
+    assert missing_path is None
+    assert calls == []
+    assert any("fetch is disabled" in limitation for limitation in limitations)
+
+    enabled_settings = Settings(
+        model_cache_dir=runtime_dir / "models-enabled",
+        model_fetch_policy="allow_download",
+        onnx_fetch_enabled=True,
+    )
+    fetched_path, fetch_limitations = _resolve_onnx_model(
+        enabled_settings,
+        "whisper.onnx",
+        "voicescript/whisper-onnx",
+        kind="whisper",
+        fetcher=fake_fetcher,
+    )
+    assert fetched_path == runtime_dir / "fetched" / "whisper.onnx"
+    assert fetch_limitations == []
+    assert calls and calls[0]["repo_id"] == "voicescript/whisper-onnx"
 
 
 class _Completed:

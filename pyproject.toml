@@ -10,6 +10,12 @@ dependencies = [
   "uvicorn",
 ]
 
+[project.optional-dependencies]
+onnx = [
+  "onnxruntime",
+  "huggingface-hub",
+]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

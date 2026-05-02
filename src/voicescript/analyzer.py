@@ -72,9 +72,22 @@ class ForensicAnalyzer:
             f"vocals_path={source_separation.vocals_path or ''} limitations={len(source_separation.limitations)}",
         )
 
-        speech_input = Path(source_separation.vocals_path) if source_separation.vocals_path else path
-        self._log_stage(run_id, "speech", "start", f"input={speech_input}")
-        speech = self.speech_analyzer.analyze(speech_input)
+        transcription_input = Path(source_separation.vocals_path) if source_separation.vocals_path else path
+        transcription_source = "demucs_vocals" if source_separation.vocals_path else "original_audio"
+        diarization_input = path
+        self._log_stage(
+            run_id,
+            "speech",
+            "start",
+            f"transcription_input={transcription_input} transcription_source={transcription_source} "
+            f"diarization_input={diarization_input} diarization_source=original_audio",
+        )
+        speech = self.speech_analyzer.analyze(
+            transcription_input,
+            diarization_input=diarization_input,
+            transcription_source=transcription_source,
+            diarization_source="original_audio",
+        )
         self._log_stage(
             run_id,
             "speech",
@@ -153,7 +166,12 @@ class ForensicAnalyzer:
         return to_jsonable(estimate_channel_setup(metadata))
 
     def estimate_speakers(self, path: Path) -> dict[str, object]:
-        speech = self.speech_analyzer.analyze(Path(path))
+        speech = self.speech_analyzer.analyze(
+            Path(path),
+            diarization_input=Path(path),
+            transcription_source="original_audio",
+            diarization_source="original_audio",
+        )
         report = build_report_from_measurements(
             file_name=Path(path).name,
             sha256=sha256_file(Path(path)),

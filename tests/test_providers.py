@@ -62,6 +62,27 @@ def test_speech_analyzer_can_be_composed_from_disabled_providers():
     assert "Diarization disabled" in result.limitations[1]
 
 
+def test_speech_analyzer_routes_transcription_and_diarization_inputs_separately():
+    transcriber = _RecordingTranscriber()
+    diarizer = _RecordingDiarizer()
+    analyzer = SpeechAnalyzer(transcriber=transcriber, diarizer=diarizer)
+
+    result = analyzer.analyze(
+        Path("vocals.wav"),
+        diarization_input=Path("original.mp3"),
+        transcription_source="demucs_vocals",
+        diarization_source="original_audio",
+    )
+
+    assert transcriber.paths == [Path("vocals.wav")]
+    assert diarizer.paths == [Path("original.mp3")]
+    assert result.transcription.input_source == "demucs_vocals"
+    assert result.transcription.input_path == "vocals.wav"
+    assert result.diarization.input_source == "original_audio"
+    assert result.diarization.input_path == "original.mp3"
+    assert result.speaker_segments[0].speaker == "SPEAKER_00"
+
+
 def test_disabled_speech_providers_return_normalized_pydantic_results():
     transcription = DisabledTranscriber().transcribe(Path("court.wav"))
     diarization = DisabledDiarizer().diarize(Path("court.wav"))
@@ -332,6 +353,57 @@ class _Completed:
     returncode = 0
     stdout = ""
     stderr = ""
+
+
+class _RecordingTranscriber:
+    provider_name = "recording-transcriber"
+
+    def __init__(self):
+        self.paths: list[Path] = []
+
+    def readiness(self):
+        return {}
+
+    def transcribe(self, input_file: Path) -> TranscriptionResult:
+        self.paths.append(Path(input_file))
+        return TranscriptionResult(
+            provider=self.provider_name,
+            output_type="fixture",
+            transcript_text="hello",
+            transcript_segments=[
+                {
+                    "start_seconds": 0,
+                    "end_seconds": 1,
+                    "text": "hello",
+                }
+            ],
+        )
+
+
+class _RecordingDiarizer:
+    provider_name = "recording-diarizer"
+
+    def __init__(self):
+        self.paths: list[Path] = []
+
+    def readiness(self):
+        return {}
+
+    def diarize(self, input_file: Path) -> DiarizationResult:
+        self.paths.append(Path(input_file))
+        return DiarizationResult(
+            provider=self.provider_name,
+            output_type="fixture",
+            speaker_segments=[
+                {
+                    "speaker": "SPEAKER_00",
+                    "start_seconds": 0,
+                    "end_seconds": 1,
+                }
+            ],
+            estimated_speaker_count=1,
+            confidence="medium",
+        )
 
 
 class _FakePipeline:

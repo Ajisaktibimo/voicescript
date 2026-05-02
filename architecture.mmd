@@ -43,22 +43,26 @@ graph TD
     Execute <-->|Tool Calling| MCP
 
     subgraph "3. ML Intelligence Pipeline"
-        D1[Demucs: Isolate Vocals]:::ml
-        P1[Pyannote 3.1: Diarization]:::ml
-        W1[Faster-Whisper: Transcription]:::ml
+        Original[Original / Lightly Normalized Audio]:::ml
+        D1[Demucs: Isolate Vocals for ASR]:::ml
+        P1[Pyannote 3.1: Diarization on Original Evidence]:::ml
+        W1[Faster-Whisper: Transcription on Enhanced Vocals]:::ml
         Align[Alignment Engine]:::ml
+        Fusion[Forensic Fusion + Confidence Rules]:::ml
     end
 
-    Report -->|Clean audio ready| D1
-    D1 --> P1
+    Report -->|Audio ready| Original
+    Original --> D1
+    Original --> P1
     D1 --> W1
     P1 --> Align
     W1 --> Align
+    Align --> Fusion
 
     subgraph "4. Structured Output Layer"
         Pydantic[Instructor: Enforce JSON Schema]:::output
         FinalDB[(Database / Downstream Processing)]:::output
     end
 
-    Align --> Pydantic
+    Fusion --> Pydantic
     Pydantic --> FinalDB

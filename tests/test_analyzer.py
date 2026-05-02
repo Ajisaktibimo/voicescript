@@ -55,8 +55,13 @@ def test_demucs_vocals_path_is_used_for_speech_when_available(runtime_dir):
 
     report = analyzer.analyze_file(audio)
 
-    assert speech.paths == [vocals]
+    assert speech.transcription_paths == [vocals]
+    assert speech.diarization_paths == [audio]
     assert report.source_separation.vocals_path == str(vocals)
+    assert report.transcription.input_source == "demucs_vocals"
+    assert report.transcription.input_path == str(vocals)
+    assert report.diarization.input_source == "original_audio"
+    assert report.diarization.input_path == str(audio)
     assert report.transcription.provider == "test-transcriber"
     assert report.diarization.provider == "test-diarizer"
 
@@ -80,7 +85,8 @@ def test_demucs_unavailable_falls_back_to_original_for_speech(runtime_dir):
 
     report = analyzer.analyze_file(audio)
 
-    assert speech.paths == [audio]
+    assert speech.transcription_paths == [audio]
+    assert speech.diarization_paths == [audio]
     assert "Demucs is not installed." in report.limitations
 
 
@@ -220,23 +226,37 @@ class RaisingSourceSeparator:
 
 class RecordingSpeechAnalyzer:
     def __init__(self):
-        self.paths: list[Path] = []
+        self.transcription_paths: list[Path] = []
+        self.diarization_paths: list[Path] = []
 
     def readiness(self):
         return {}
 
-    def analyze(self, path: Path) -> SpeechAnalysisResult:
-        self.paths.append(Path(path))
+    def analyze(
+        self,
+        transcription_input: Path,
+        *,
+        diarization_input: Path | None = None,
+        transcription_source: str = "analysis_input",
+        diarization_source: str = "analysis_input",
+    ) -> SpeechAnalysisResult:
+        diarization_input = diarization_input or transcription_input
+        self.transcription_paths.append(Path(transcription_input))
+        self.diarization_paths.append(Path(diarization_input))
         return SpeechAnalysisResult(
             transcript_text="hello",
             transcription=TranscriptionResult(
                 provider="test-transcriber",
                 output_type="fixture",
                 transcript_text="hello",
+                input_source=transcription_source,
+                input_path=str(transcription_input),
             ),
             diarization=DiarizationResult(
                 provider="test-diarizer",
                 output_type="fixture",
+                input_source=diarization_source,
+                input_path=str(diarization_input),
                 speaker_segments=[
                     SpeakerSegment(speaker="SPEAKER_00", start_seconds=0, end_seconds=1, text="")
                 ],

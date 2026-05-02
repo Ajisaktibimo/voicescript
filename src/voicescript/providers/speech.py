@@ -43,6 +43,7 @@ class DisabledTranscriber:
     def transcribe(self, input_file: Path) -> TranscriptionResult:
         return _transcription_result(
             provider=self.provider_name,
+            input_path=input_file,
             output_type="none",
             limitations=["Transcription disabled by provider configuration."],
         )
@@ -60,6 +61,7 @@ class DisabledDiarizer:
     def diarize(self, input_file: Path) -> DiarizationResult:
         return _diarization_result(
             provider=self.provider_name,
+            input_path=input_file,
             output_type="none",
             limitations=["Diarization disabled by provider configuration."],
         )
@@ -81,6 +83,7 @@ class UnavailableTranscriber:
     def transcribe(self, input_file: Path) -> TranscriptionResult:
         return _transcription_result(
             provider=self.provider_name,
+            input_path=input_file,
             output_type="none",
             limitations=[
                 f"Provider '{self.provider_name}' is selected but no offline transcription adapter is configured; "
@@ -105,6 +108,7 @@ class UnavailableDiarizer:
     def diarize(self, input_file: Path) -> DiarizationResult:
         return _diarization_result(
             provider=self.provider_name,
+            input_path=input_file,
             output_type="none",
             limitations=[
                 f"Provider '{self.provider_name}' is selected but no offline diarization adapter is configured; "
@@ -136,6 +140,7 @@ class LocalWhisperTranscriber:
             return _transcription_result(
                 provider=self.provider_name,
                 model=self.settings.whisper_model,
+                input_path=input_file,
                 output_type="none",
                 limitations=["Transcription skipped because faster-whisper is not installed."],
             )
@@ -151,6 +156,7 @@ class LocalWhisperTranscriber:
         return _transcription_result(
             provider=self.provider_name,
             model=self.settings.whisper_model,
+            input_path=input_file,
             output_type=type(segments).__name__,
             transcript_segments=[
                 TranscriptSegment(
@@ -193,6 +199,7 @@ class LocalOnnxWhisperTranscriber:
             return _transcription_result(
                 provider=self.provider_name,
                 model=self.settings.whisper_onnx_model,
+                input_path=input_file,
                 output_type="none",
                 limitations=["ONNX transcription skipped because onnxruntime is not installed."],
             )
@@ -207,6 +214,7 @@ class LocalOnnxWhisperTranscriber:
             return _transcription_result(
                 provider=self.provider_name,
                 model=self.settings.whisper_onnx_model,
+                input_path=input_file,
                 output_type="none",
                 limitations=limitations,
             )
@@ -214,6 +222,7 @@ class LocalOnnxWhisperTranscriber:
         return _transcription_result(
             provider=self.provider_name,
             model=str(model_path),
+            input_path=input_file,
             output_type="onnx",
             limitations=[
                 f"ONNX transcription inference is not implemented yet for model '{model_path}'. "
@@ -246,6 +255,7 @@ class LocalPyannoteDiarizer:
             return _diarization_result(
                 provider=self.provider_name,
                 model=self.settings.pyannote_model,
+                input_path=input_file,
                 output_type="none",
                 limitations=["Diarization skipped because pyannote.audio is not installed."],
             )
@@ -253,6 +263,7 @@ class LocalPyannoteDiarizer:
             return _diarization_result(
                 provider=self.provider_name,
                 model=self.settings.pyannote_model,
+                input_path=input_file,
                 output_type="none",
                 limitations=["Diarization skipped because PYANNOTE_AUTH_TOKEN is not configured."],
             )
@@ -269,6 +280,7 @@ class LocalPyannoteDiarizer:
             return _diarization_result(
                 provider=self.provider_name,
                 model=self.settings.pyannote_model,
+                input_path=input_file,
                 output_type="error",
                 limitations=[f"Diarization failed in local pyannote provider: {exc}"],
             )
@@ -278,6 +290,7 @@ class LocalPyannoteDiarizer:
         return _diarization_result(
             provider=self.provider_name,
             model=self.settings.pyannote_model,
+            input_path=input_file,
             output_type=output_type,
             speaker_segments=segments,
             limitations=limitations,
@@ -382,6 +395,8 @@ def _transcription_result(
     *,
     provider: str,
     model: str | None = None,
+    input_source: str = "provider_input",
+    input_path: Path | str | None = None,
     output_type: str,
     transcript_segments: list[TranscriptSegment] | None = None,
     limitations: list[str] | None = None,
@@ -395,6 +410,8 @@ def _transcription_result(
     return TranscriptionResult(
         provider=provider,
         model=model,
+        input_source=input_source,
+        input_path=str(input_path) if input_path is not None else None,
         output_type=output_type,
         transcript_text=transcript_text,
         transcript_segments=normalized_segments,
@@ -408,6 +425,8 @@ def _diarization_result(
     *,
     provider: str,
     model: str | None = None,
+    input_source: str = "provider_input",
+    input_path: Path | str | None = None,
     output_type: str,
     speaker_segments: list[SpeakerSegment] | None = None,
     limitations: list[str] | None = None,
@@ -421,6 +440,8 @@ def _diarization_result(
     return DiarizationResult(
         provider=provider,
         model=model,
+        input_source=input_source,
+        input_path=str(input_path) if input_path is not None else None,
         output_type=output_type,
         speaker_segments=normalized_segments,
         estimated_speaker_count=speaker_count,
@@ -428,6 +449,46 @@ def _diarization_result(
         limitations=limitations or [],
         evidence=normalized_evidence,
     )
+
+
+def _tag_transcription_input(
+    result: TranscriptionResult,
+    input_file: Path,
+    input_source: str,
+) -> TranscriptionResult:
+    return result.model_copy(
+        update={
+            "input_source": input_source,
+            "input_path": str(input_file),
+            "evidence": _append_input_evidence(result.evidence, "Transcription", input_source, input_file),
+        }
+    )
+
+
+def _tag_diarization_input(
+    result: DiarizationResult,
+    input_file: Path,
+    input_source: str,
+) -> DiarizationResult:
+    return result.model_copy(
+        update={
+            "input_source": input_source,
+            "input_path": str(input_file),
+            "evidence": _append_input_evidence(result.evidence, "Diarization", input_source, input_file),
+        }
+    )
+
+
+def _append_input_evidence(
+    evidence: list[str],
+    label: str,
+    input_source: str,
+    input_file: Path,
+) -> list[str]:
+    item = f"{label} input source: {input_source} ({input_file})."
+    if item in evidence:
+        return evidence
+    return [*evidence, item]
 
 
 def _normalize_transcript_segments(segments: list[TranscriptSegment]) -> list[TranscriptSegment]:
@@ -504,6 +565,7 @@ class LocalOnnxDiarizer:
             return _diarization_result(
                 provider=self.provider_name,
                 model=self.settings.pyannote_onnx_model,
+                input_path=input_file,
                 output_type="none",
                 limitations=["ONNX diarization skipped because onnxruntime is not installed."],
             )
@@ -518,6 +580,7 @@ class LocalOnnxDiarizer:
             return _diarization_result(
                 provider=self.provider_name,
                 model=self.settings.pyannote_onnx_model,
+                input_path=input_file,
                 output_type="none",
                 limitations=limitations,
             )
@@ -525,6 +588,7 @@ class LocalOnnxDiarizer:
         return _diarization_result(
             provider=self.provider_name,
             model=str(model_path),
+            input_path=input_file,
             output_type="onnx",
             limitations=[
                 f"ONNX diarization inference is not implemented yet for model '{model_path}'. "
@@ -542,9 +606,25 @@ class SpeechAnalyzer:
     def readiness(self) -> dict[str, dict[str, str | bool]]:
         return {**self.transcriber.readiness(), **self.diarizer.readiness()}
 
-    def analyze(self, input_file: Path) -> SpeechAnalysisResult:
-        transcription = self.transcriber.transcribe(input_file)
-        diarization = self.diarizer.diarize(input_file)
+    def analyze(
+        self,
+        transcription_input: Path,
+        *,
+        diarization_input: Path | None = None,
+        transcription_source: str = "analysis_input",
+        diarization_source: str = "analysis_input",
+    ) -> SpeechAnalysisResult:
+        diarization_input = diarization_input or transcription_input
+        transcription = _tag_transcription_input(
+            self.transcriber.transcribe(transcription_input),
+            transcription_input,
+            transcription_source,
+        )
+        diarization = _tag_diarization_input(
+            self.diarizer.diarize(diarization_input),
+            diarization_input,
+            diarization_source,
+        )
         speaker_segments = _align_transcript_to_speakers(
             transcription.transcript_segments,
             diarization.speaker_segments,

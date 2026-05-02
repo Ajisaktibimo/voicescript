@@ -28,6 +28,8 @@ ProviderConfidence = Confidence | Literal["unknown"]
 class TranscriptionResult(JsonModel):
     provider: str = "unknown"
     model: str | None = None
+    input_source: str = "unknown"
+    input_path: str | None = None
     output_type: str = "unknown"
     transcript_text: str = ""
     transcript_segments: list[TranscriptSegment] = Field(default_factory=list)
@@ -39,6 +41,8 @@ class TranscriptionResult(JsonModel):
 class DiarizationResult(JsonModel):
     provider: str = "unknown"
     model: str | None = None
+    input_source: str = "unknown"
+    input_path: str | None = None
     output_type: str = "unknown"
     speaker_segments: list[SpeakerSegment] = Field(default_factory=list)
     estimated_speaker_count: int | None = None

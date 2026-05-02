@@ -216,8 +216,34 @@ class LocalPyannoteDiarizer:
         except Exception as exc:
             return [], [f"Diarization failed in local pyannote provider: {exc}"]
 
-        segments: list[SpeakerSegment] = []
-        for turn, _track, speaker in diarization.itertracks(yield_label=True):
+        return _parse_pyannote_diarization(diarization)
+
+
+def _parse_pyannote_diarization(diarization: object) -> tuple[list[SpeakerSegment], list[str]]:
+    itertracks = getattr(diarization, "itertracks", None)
+    if callable(itertracks):
+        return _parse_pyannote_itertracks(itertracks)
+
+    for field_name in ("speaker_diarization", "diarization", "segments"):
+        nested_output = getattr(diarization, field_name, None)
+        if nested_output is not None and nested_output is not diarization:
+            segments, limitations = _parse_pyannote_diarization(nested_output)
+            if segments or not _is_unsupported_output_limitation(limitations):
+                return segments, limitations
+
+    if isinstance(diarization, (list, tuple)):
+        return _parse_speaker_segment_items(diarization, source="sequence")
+
+    return [], [
+        f"Diarization produced unsupported output type {type(diarization).__name__}; "
+        "speaker segments were not parsed."
+    ]
+
+
+def _parse_pyannote_itertracks(itertracks) -> tuple[list[SpeakerSegment], list[str]]:
+    segments: list[SpeakerSegment] = []
+    try:
+        for turn, _track, speaker in itertracks(yield_label=True):
             segments.append(
                 SpeakerSegment(
                     speaker=str(speaker),
@@ -226,7 +252,64 @@ class LocalPyannoteDiarizer:
                     text="",
                 )
             )
-        return segments, []
+    except Exception as exc:
+        return [], [f"Diarization output parsing failed in local pyannote provider: {exc}"]
+    return segments, []
+
+
+def _parse_speaker_segment_items(items: object, *, source: str) -> tuple[list[SpeakerSegment], list[str]]:
+    segments: list[SpeakerSegment] = []
+    try:
+        for item in items:
+            segment = _speaker_segment_from_item(item)
+            if segment is not None:
+                segments.append(segment)
+    except TypeError:
+        return [], [f"Diarization output field '{source}' is not iterable."]
+    except Exception as exc:
+        return [], [f"Diarization output parsing failed from '{source}': {exc}"]
+
+    if not segments:
+        return [], [f"Diarization output field '{source}' had no parseable speaker segments."]
+    return segments, []
+
+
+def _speaker_segment_from_item(item: object) -> SpeakerSegment | None:
+    if isinstance(item, dict):
+        start = _first_mapping_value(item, ("start", "start_seconds"))
+        end = _first_mapping_value(item, ("end", "end_seconds"))
+        speaker = _first_mapping_value(item, ("speaker", "label"))
+    else:
+        start = _first_attribute_value(item, ("start", "start_seconds"))
+        end = _first_attribute_value(item, ("end", "end_seconds"))
+        speaker = _first_attribute_value(item, ("speaker", "label"))
+
+    if start is None or end is None or speaker is None:
+        return None
+    return SpeakerSegment(
+        speaker=str(speaker),
+        start_seconds=float(start),
+        end_seconds=float(end),
+        text="",
+    )
+
+
+def _first_mapping_value(item: dict, names: tuple[str, ...]) -> object | None:
+    for name in names:
+        if name in item:
+            return item[name]
+    return None
+
+
+def _first_attribute_value(item: object, names: tuple[str, ...]) -> object | None:
+    for name in names:
+        if hasattr(item, name):
+            return getattr(item, name)
+    return None
+
+
+def _is_unsupported_output_limitation(limitations: list[str]) -> bool:
+    return bool(limitations) and "unsupported output type" in limitations[0]
 
 
 class LocalOnnxDiarizer:

@@ -169,6 +169,23 @@ def test_local_pyannote_diarizer_returns_limitation_when_audio_loading_fails(mon
     assert any("Diarization failed" in limitation for limitation in limitations)
 
 
+def test_local_pyannote_diarizer_returns_limitation_for_unsupported_output(monkeypatch):
+    pyannote_module = types.ModuleType("pyannote")
+    pyannote_audio_module = types.ModuleType("pyannote.audio")
+    pyannote_audio_module.Pipeline = _UnsupportedOutputPipeline
+
+    monkeypatch.setattr("voicescript.providers.speech._module_status", lambda *args, **kwargs: {"available": True, "detail": "available"})
+    monkeypatch.setitem(sys.modules, "pyannote", pyannote_module)
+    monkeypatch.setitem(sys.modules, "pyannote.audio", pyannote_audio_module)
+
+    diarizer = LocalPyannoteDiarizer(Settings(pyannote_auth_token="token"))
+
+    segments, limitations = diarizer.diarize(Path("court.wav"))
+
+    assert segments == []
+    assert any("unsupported output type DiarizeOutput" in limitation for limitation in limitations)
+
+
 def test_onnx_speech_providers_report_missing_local_models_without_network(monkeypatch, runtime_dir):
     monkeypatch.setattr("voicescript.providers.speech._module_status", lambda *args, **kwargs: {"available": True, "detail": "available"})
     settings = Settings(
@@ -276,3 +293,16 @@ class _FakePipeline:
 
     def __call__(self, payload):
         raise TypeError("'>' not supported between instances of 'MagicMock' and 'MagicMock'")
+
+
+class DiarizeOutput:
+    pass
+
+
+class _UnsupportedOutputPipeline:
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        return cls()
+
+    def __call__(self, payload):
+        return DiarizeOutput()

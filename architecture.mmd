@@ -1,0 +1,64 @@
+graph TD
+    classDef input fill:#f9f6f0,stroke:#333,stroke-width:2px;
+    classDef agent fill:#e1f5fe,stroke:#0288d1,stroke-width:2px;
+    classDef tools fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px;
+    classDef ml fill:#fce4ec,stroke:#c2185b,stroke-width:2px;
+    classDef output fill:#e8f5e9,stroke:#388e3c,stroke-width:2px;
+    classDef infra fill:#eceff1,stroke:#607d8b,stroke-width:2px;
+
+    subgraph "Infrastructure Layer"
+        API[FastAPI Endpoint]:::infra
+        Storage[AWS S3: Audio Blob Storage]:::infra
+    end
+
+    ClientUpload[Upload Audio File]:::input --> API
+    API --> Storage
+    Storage --> AgentLoop
+
+    subgraph "1. Agentic Orchestration (LangGraph)"
+        AgentLoop{LLM Agent Core}:::agent
+        Plan[Decide FFMPEG commands]:::agent
+        Execute[Call tools dynamically]:::agent
+        Reflect[Evaluate results]:::agent
+        Report[Compose final report]:::agent
+
+        AgentLoop --> Plan
+        Plan --> Execute
+        Execute --> Reflect
+        Reflect -->|Audio needs more work| Plan
+        Reflect -->|Audio is optimized| Report
+    end
+
+    subgraph "2. FastMCP Server"
+        MCP[MCP Interface]:::tools
+        T1[get_audio_metadata]:::tools
+        T2[detect_silence]:::tools
+        T3[detect_clipping]:::tools
+        
+        MCP --> T1
+        MCP --> T2
+        MCP --> T3
+    end
+
+    Execute <-->|Tool Calling| MCP
+
+    subgraph "3. ML Intelligence Pipeline"
+        D1[Demucs: Isolate Vocals]:::ml
+        P1[Pyannote 3.1: Diarization]:::ml
+        W1[Faster-Whisper: Transcription]:::ml
+        Align[Alignment Engine]:::ml
+    end
+
+    Report -->|Clean audio ready| D1
+    D1 --> P1
+    D1 --> W1
+    P1 --> Align
+    W1 --> Align
+
+    subgraph "4. Structured Output Layer"
+        Pydantic[Instructor: Enforce JSON Schema]:::output
+        FinalDB[(Database / Downstream Processing)]:::output
+    end
+
+    Align --> Pydantic
+    Pydantic --> FinalDB

@@ -1,0 +1,23 @@
+[project]
+name = "voicescript"
+version = "0.1.0"
+description = "Local forensic triage system for deposition audio."
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi",
+  "fastmcp",
+  "pydantic",
+  "uvicorn",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q -p no:cacheprovider"

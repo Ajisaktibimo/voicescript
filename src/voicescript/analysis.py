@@ -10,10 +10,10 @@ from .models import (
     CommandProvenance,
     DiarizationResult,
     Estimate,
+    EvidenceManifest,
     ForensicFinding,
     ForensicReport,
     SilenceSummary,
-    SourceSeparationResult,
     SpeakerSegment,
     TranscriptionResult,
     VolumeStats,
@@ -37,9 +37,9 @@ def build_report_from_measurements(
     provenance: list[CommandProvenance],
     source_path: str | None = None,
     extra_limitations: list[str] | None = None,
-    source_separation: SourceSeparationResult | dict[str, object] | None = None,
     transcription: TranscriptionResult | dict[str, object] | None = None,
     diarization: DiarizationResult | dict[str, object] | None = None,
+    evidence_manifest: EvidenceManifest | dict[str, object] | None = None,
 ) -> ForensicReport:
     raw_estimate = _estimate_speaker_count(speaker_segments)
     estimated_microphone_count = Estimate(
@@ -49,7 +49,6 @@ def build_report_from_measurements(
     )
 
     findings = _build_findings(metadata, silence, volume, channel_analysis)
-    separation = _coerce_source_separation(source_separation)
     transcription_result = _coerce_transcription(transcription)
     diarization_result = _coerce_diarization(diarization)
 
@@ -72,7 +71,6 @@ def build_report_from_measurements(
         limitations.append("Speaker count is unknown because diarization was unavailable or inconclusive.")
     if extra_limitations:
         limitations.extend(extra_limitations)
-    limitations.extend(separation.limitations)
 
     evidence_trail = [
         f"ffprobe measured {metadata.audio_streams} audio stream(s), {metadata.channels} channel(s), "
@@ -111,7 +109,6 @@ def build_report_from_measurements(
         speaker_segments=speaker_segments,
         transcription=transcription_result,
         diarization=diarization_result,
-        source_separation=separation,
         tamper_indicators=findings,
         issues=issues,
         recommendations=recommendations,
@@ -121,6 +118,7 @@ def build_report_from_measurements(
             "channel_analysis": channel_analysis.confidence,
         },
         evidence_trail=evidence_trail,
+        evidence_manifest=_coerce_evidence_manifest(evidence_manifest),
         limitations=limitations,
         summary_text=summary_text,
         provenance=provenance,
@@ -164,17 +162,6 @@ def _fuse_speaker_estimate(
     )
 
 
-def _coerce_source_separation(value: SourceSeparationResult | dict[str, object] | None) -> SourceSeparationResult:
-    if isinstance(value, SourceSeparationResult):
-        return value
-    if isinstance(value, dict):
-        return SourceSeparationResult.model_validate(value)
-    return SourceSeparationResult(
-        available=False,
-        enabled=True,
-        limitations=["Demucs source separation was not run."],
-    )
-
 
 def _coerce_transcription(value: TranscriptionResult | dict[str, object] | None) -> TranscriptionResult:
     if isinstance(value, TranscriptionResult):
@@ -190,6 +177,14 @@ def _coerce_diarization(value: DiarizationResult | dict[str, object] | None) -> 
     if isinstance(value, dict):
         return DiarizationResult.model_validate(value)
     return DiarizationResult()
+
+
+def _coerce_evidence_manifest(value: EvidenceManifest | dict[str, object] | None) -> EvidenceManifest | None:
+    if isinstance(value, EvidenceManifest):
+        return value
+    if isinstance(value, dict):
+        return EvidenceManifest.model_validate(value)
+    return None
 
 
 def _estimate_speaker_count(segments: list[SpeakerSegment]) -> Estimate:

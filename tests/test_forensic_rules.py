@@ -56,14 +56,6 @@ def test_forensic_report_keeps_estimates_confidence_and_evidence():
         provenance=[
             CommandProvenance(tool="ffprobe", command=["ffprobe", "-show_streams"], exit_code=0)
         ],
-        source_separation={
-            "engine": "demucs",
-            "available": False,
-            "enabled": True,
-            "vocals_path": None,
-            "limitations": ["Demucs is not installed."],
-            "provenance": [],
-        },
     )
 
     assert report.channels == 2
@@ -82,9 +74,7 @@ def test_forensic_report_keeps_estimates_confidence_and_evidence():
     assert all(f.confidence in {"low", "medium", "high"} for f in report.tamper_indicators)
     assert all(f.evidence for f in report.tamper_indicators)
     assert report.limitations
-    assert report.source_separation.engine == "demucs"
-    assert report.source_separation.available is False
-    assert "Demucs is not installed." in report.limitations
+    assert report.limitations
     assert "triage" in report.summary_text.lower()
 
 

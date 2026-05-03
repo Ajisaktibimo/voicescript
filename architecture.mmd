@@ -5,15 +5,32 @@ graph TD
     classDef ml fill:#fce4ec,stroke:#c2185b,stroke-width:2px;
     classDef output fill:#e8f5e9,stroke:#388e3c,stroke-width:2px;
     classDef infra fill:#eceff1,stroke:#607d8b,stroke-width:2px;
+    classDef worker fill:#fff3e0,stroke:#ef6c00,stroke-width:2px;
 
     subgraph "Infrastructure Layer"
         API[FastAPI Endpoint]:::infra
-        Storage[AWS S3: Audio Blob Storage]:::infra
+        JobStore[(Job Store + Report Index)]:::infra
+        Storage[Local/S3 Audio + Artifact Storage]:::infra
     end
 
     ClientUpload[Upload Audio File]:::input --> API
-    API --> Storage
-    Storage --> AgentLoop
+    API -->|Persist source artifact| Storage
+    API -->|Poll status and reports| JobStore
+
+    subgraph "0. Execution Control"
+        Inline[Inline /v1/analyze request]:::worker
+        ThreadPool[FastAPI Threadpool: run sync model work off the event loop]:::worker
+        BG[FastAPI BackgroundTasks: local async job mode]:::worker
+        Broker[Celery Broker: Redis or RabbitMQ]:::worker
+        Workers[Celery Workers: process and machine scale]:::worker
+
+        API --> Inline
+        Inline --> ThreadPool
+        API --> BG
+        BG --> ThreadPool
+        API -.-> Broker
+        Broker -.-> Workers
+    end
 
     subgraph "1. Agentic Orchestration (LangGraph)"
         AgentLoop{LLM Agent Core}:::agent
@@ -29,34 +46,54 @@ graph TD
         Reflect -->|Audio is optimized| Report
     end
 
+    ThreadPool --> AgentLoop
+    Workers -.-> AgentLoop
+    AgentLoop --> JobStore
+
     subgraph "2. FastMCP Server"
         MCP[MCP Interface]:::tools
         T1[get_audio_metadata]:::tools
         T2[detect_silence]:::tools
         T3[detect_clipping]:::tools
-        
+        T4[analyze_channels]:::tools
+        T5[estimate_speakers]:::tools
+        T6[estimate_microphone_setup]:::tools
+        T7[detect_forensic_indicators]:::tools
+        T8[analyze_audio_file]:::tools
+        T9[analyze_audio_batch]:::tools
+        T10[analyze_with_agent]:::tools
+        T11[evaluate_report]:::tools
+        T12[generate_spectrogram]:::tools
+
         MCP --> T1
         MCP --> T2
         MCP --> T3
+        MCP --> T4
+        MCP --> T5
+        MCP --> T6
+        MCP --> T7
+        MCP --> T8
+        MCP --> T9
+        MCP --> T10
+        MCP --> T11
+        MCP --> T12
     end
 
     Execute <-->|Tool Calling| MCP
 
     subgraph "3. ML Intelligence Pipeline"
-        Original[Original / Lightly Normalized Audio]:::ml
+        Original[Original Evidence Audio]:::ml
         N1[FFmpeg: Mono 16k WAV for Diarization]:::ml
-        D1[Demucs: Isolate Vocals for ASR]:::ml
-        P1[Pyannote 3.1: Diarization on Original Evidence]:::ml
-        W1[Faster-Whisper: Transcription on Enhanced Vocals]:::ml
+        P1[Pyannote 3.1: Diarization]:::ml
+        W1[Faster-Whisper: Transcription on Original]:::ml
         Align[Alignment Engine]:::ml
         Fusion[Forensic Fusion + Confidence Rules]:::ml
     end
 
     Report -->|Audio ready| Original
-    Original --> D1
+    Original --> W1
     Original --> N1
     N1 --> P1
-    D1 --> W1
     P1 --> Align
     W1 --> Align
     Align --> Fusion
@@ -68,3 +105,11 @@ graph TD
 
     Fusion --> Pydantic
     Pydantic --> FinalDB
+
+    subgraph "5. Evaluation Harness"
+        EvalRef[EvaluationReference: Human Annotations]:::output
+        EvalResult[EvaluationResult: WER + Speaker Count + Attribution Error]:::output
+        EvalRef --> EvalResult
+    end
+
+    T11 --> EvalRef

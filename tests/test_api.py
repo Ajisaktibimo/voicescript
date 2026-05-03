@@ -1,9 +1,14 @@
 from pathlib import Path
+import asyncio
 import logging
 import shutil
+import threading
+import time
 import uuid
 
 from fastapi.testclient import TestClient
+import anyio
+import httpx
 import pytest
 
 from voicescript.api import create_app
@@ -66,13 +71,28 @@ class FakeAnalyzer:
         )
 
 
-def make_client(runtime_dir):
+class FakeAgent:
+    def analyze_file(self, path: Path):
+        return {
+            "file_name": path.name,
+            "duration_seconds": 120,
+            "audio_quality": {"silence_ratio": 0.05, "clipping_detected": False, "avg_volume_db": -18},
+            "issues": ["Minor hiss"],
+            "recommendations": "High quality audio."
+        }
+
+
+def make_client(runtime_dir, analyzer=None, agent=None):
     settings = Settings(
         data_dir=runtime_dir / "data",
         api_key="secret",
         inline_jobs=True,
     )
-    return TestClient(create_app(settings=settings, analyzer=FakeAnalyzer()))
+    return TestClient(create_app(
+        settings=settings, 
+        analyzer=analyzer or FakeAnalyzer(),
+        agent=agent or FakeAgent()
+    ))
 
 
 @pytest.fixture()
@@ -112,6 +132,20 @@ def test_openapi_docs_include_x_api_key_security_scheme(client):
     assert security_scheme == {"type": "apiKey", "in": "header", "name": "X-API-Key"}
     assert {"ApiKeyAuth": []} in schema["paths"]["/v1/audio-jobs"]["post"]["security"]
     assert "security" not in schema["paths"]["/v1/health"]["get"]
+    assert "Upload Files With Picker Slots For Inline Analysis" in schema["paths"]["/v1/analyze/files"]["post"]["summary"]
+    assert "Upload Files With Picker Slots For Agentic Analysis" in schema["paths"]["/v1/analyze/llm/files"]["post"]["summary"]
+    assert "List Saved Report Table" in schema["paths"]["/v1/reports"]["get"]["summary"]
+    inline_body_ref = schema["paths"]["/v1/analyze/files"]["post"]["requestBody"]["content"]["multipart/form-data"]["schema"]["$ref"]
+    inline_schema = schema["components"]["schemas"][inline_body_ref.removeprefix("#/components/schemas/")]
+    assert inline_schema["properties"]["file_1"] == {"type": "string", "format": "binary", "title": "File 1"}
+    assert inline_schema["properties"]["file_2"] == {
+        "anyOf": [{"type": "string", "format": "binary"}, {"type": "null"}],
+        "title": "File 2",
+    }
+    assert "files" not in inline_schema["properties"]
+    for path in ("/v1/analyze", "/v1/analyze/llm", "/v1/batches"):
+        multipart = schema["paths"][path]["post"]["requestBody"]["content"]["multipart/form-data"]
+        assert multipart["encoding"]["files"] == {"style": "form", "explode": True}
 
 
 def test_analyze_endpoint_returns_report_without_polling_job_id(client):
@@ -126,6 +160,95 @@ def test_analyze_endpoint_returns_report_without_polling_job_id(client):
     assert payload["file_name"] == "instant.wav"
     assert payload["sha256"] == "feedface"
     assert "job_id" not in payload
+
+
+def test_analyze_endpoint_accepts_multiple_files_and_returns_aggregate(client):
+    response = client.post(
+        "/v1/analyze",
+        headers={"X-API-Key": "secret"},
+        files=[
+            ("files", ("first.wav", b"first-audio", "audio/wav")),
+            ("files", ("second.wav", b"second-audio", "audio/wav")),
+        ],
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["aggregate"]["file_count"] == 2
+    assert payload["aggregate"]["completed_count"] == 2
+    assert payload["aggregate"]["failed_count"] == 0
+    assert [report["file_name"] for report in payload["reports"]] == ["first.wav", "second.wav"]
+    assert payload["failures"] == []
+    assert "job_id" not in payload
+
+
+def test_analyze_files_endpoint_is_docs_friendly_multiple_upload(client):
+    response = client.post(
+        "/v1/analyze/files",
+        headers={"X-API-Key": "secret"},
+        files=[
+            ("file_1", ("first.wav", b"first-audio", "audio/wav")),
+            ("file_2", ("second.wav", b"second-audio", "audio/wav")),
+        ],
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["aggregate"]["file_count"] == 2
+    assert [report["file_name"] for report in payload["reports"]] == ["first.wav", "second.wav"]
+
+
+def test_analyze_llm_endpoint_returns_agentic_report(client):
+    response = client.post(
+        "/v1/analyze/llm",
+        headers={"X-API-Key": "secret"},
+        files={"file": ("instant.wav", b"audio-bytes", "audio/wav")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["file_name"] == "instant.wav"
+    assert "recommendations" in payload
+    assert payload["recommendations"] == "High quality audio."
+
+
+def test_analyze_llm_endpoint_accepts_multiple_files_and_returns_aggregate(client):
+    response = client.post(
+        "/v1/analyze/llm",
+        headers={"X-API-Key": "secret"},
+        files=[
+            ("files", ("first.wav", b"first-audio", "audio/wav")),
+            ("files", ("second.wav", b"second-audio", "audio/wav")),
+        ],
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["aggregate"] == {
+        "file_count": 2,
+        "completed_count": 2,
+        "failed_count": 0,
+        "weighted_silence_ratio": 0.05,
+        "issue_rollup": {"Minor hiss": 2},
+    }
+    assert [report["file_name"] for report in payload["reports"]] == ["first.wav", "second.wav"]
+    assert payload["failures"] == []
+
+
+def test_analyze_llm_files_endpoint_is_docs_friendly_multiple_upload(client):
+    response = client.post(
+        "/v1/analyze/llm/files",
+        headers={"X-API-Key": "secret"},
+        files=[
+            ("file_1", ("first.wav", b"first-audio", "audio/wav")),
+            ("file_2", ("second.wav", b"second-audio", "audio/wav")),
+        ],
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["aggregate"]["file_count"] == 2
+    assert [report["file_name"] for report in payload["reports"]] == ["first.wav", "second.wav"]
 
 
 def test_analyze_endpoint_logs_upload_and_report_pipeline_stages(runtime_dir, caplog):
@@ -182,6 +305,96 @@ def test_upload_job_runs_and_report_can_be_retrieved(client):
     assert report["file_name"] == "sample.wav"
     assert report["estimated_microphone_count"]["value"] == 1
     assert report["forensic_profile"]["classification"] == "forensic_triage"
+
+
+def test_reports_endpoint_returns_table_rows_for_saved_reports(client):
+    deterministic_response = client.post(
+        "/v1/analyze",
+        headers={"X-API-Key": "secret"},
+        files={"file": ("deterministic.wav", b"audio-bytes", "audio/wav")},
+    )
+    llm_response = client.post(
+        "/v1/analyze/llm",
+        headers={"X-API-Key": "secret"},
+        files={"file": ("agentic.wav", b"audio-bytes", "audio/wav")},
+    )
+
+    response = client.get("/v1/reports", headers={"X-API-Key": "secret"})
+
+    assert deterministic_response.status_code == 200
+    assert llm_response.status_code == 200
+    assert response.status_code == 200
+    payload = response.json()
+    rows_by_name = {row["file_name"]: row for row in payload["reports"]}
+    assert set(rows_by_name) == {"deterministic.wav", "agentic.wav"}
+    assert rows_by_name["agentic.wav"]["llm_report"] == "High quality audio."
+    assert rows_by_name["agentic.wav"]["is_llm_report"] is True
+    assert rows_by_name["deterministic.wav"]["is_llm_report"] is False
+    assert rows_by_name["agentic.wav"]["date_time"]
+    assert rows_by_name["agentic.wav"]["report_id"].endswith("_llm")
+
+
+def test_report_table_responds_while_inline_analysis_is_running(runtime_dir):
+    started = threading.Event()
+    analyzer = SlowAnalyzer(started, delay_seconds=0.6)
+    settings = Settings(
+        data_dir=runtime_dir / "data",
+        api_key="secret",
+        inline_jobs=True,
+    )
+    app = create_app(settings=settings, analyzer=analyzer)
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as async_client:
+            async def post_analyze():
+                response = await async_client.post(
+                    "/v1/analyze",
+                    headers={"X-API-Key": "secret"},
+                    files={"file": ("slow.wav", b"audio-bytes", "audio/wav")},
+                )
+                assert response.status_code == 200
+
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(post_analyze)
+                assert await anyio.to_thread.run_sync(started.wait, 1)
+
+                began_at = time.perf_counter()
+                response = await async_client.get("/v1/reports", headers={"X-API-Key": "secret"})
+                elapsed = time.perf_counter() - began_at
+
+                assert response.status_code == 200
+                assert elapsed < 0.3
+
+    anyio.run(scenario)
+
+
+def test_inline_analysis_offloads_model_work_from_event_loop(runtime_dir):
+    settings = Settings(
+        data_dir=runtime_dir / "data",
+        api_key="secret",
+        inline_jobs=True,
+    )
+    app = create_app(settings=settings, analyzer=EventLoopGuardAnalyzer(), agent=EventLoopGuardAgent())
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as async_client:
+            analyze_response = await async_client.post(
+                "/v1/analyze",
+                headers={"X-API-Key": "secret"},
+                files={"file": ("inline.wav", b"audio-bytes", "audio/wav")},
+            )
+            llm_response = await async_client.post(
+                "/v1/analyze/llm",
+                headers={"X-API-Key": "secret"},
+                files={"file": ("agent.wav", b"audio-bytes", "audio/wav")},
+            )
+
+        assert analyze_response.status_code == 200
+        assert llm_response.status_code == 200
+
+    anyio.run(scenario)
 
 
 def test_batch_job_aggregates_completed_reports(client):
@@ -292,6 +505,35 @@ class SometimesFailingAnalyzer(FakeAnalyzer):
 class AlwaysFailingAnalyzer(FakeAnalyzer):
     def analyze_file(self, path: Path):
         raise RuntimeError("decode failed")
+
+
+class SlowAnalyzer(FakeAnalyzer):
+    def __init__(self, started: threading.Event, *, delay_seconds: float):
+        self.started = started
+        self.delay_seconds = delay_seconds
+
+    def analyze_file(self, path: Path):
+        self.started.set()
+        time.sleep(self.delay_seconds)
+        return super().analyze_file(path)
+
+
+class EventLoopGuardAnalyzer(FakeAnalyzer):
+    def analyze_file(self, path: Path):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return super().analyze_file(path)
+        raise RuntimeError("analyzer ran on the request event loop")
+
+
+class EventLoopGuardAgent(FakeAgent):
+    def analyze_file(self, path: Path):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return super().analyze_file(path)
+        raise RuntimeError("agent ran on the request event loop")
 
 
 class RunIdRecordingAnalyzer(FakeAnalyzer):

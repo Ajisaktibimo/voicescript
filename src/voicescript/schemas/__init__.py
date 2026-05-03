@@ -10,11 +10,14 @@ from .base import Confidence, JsonModel, Severity, to_jsonable
 from .forensic import (
     BatchAggregate,
     Estimate,
+    EvidenceArtifact,
+    EvidenceManifest,
     ForensicFinding,
     ForensicProfile,
     ForensicReport,
-    SourceSeparationResult,
+    ToolVersion,
 )
+from .evaluation import EvaluationReference, EvaluationResult, SpeakerReferenceSegment, TranscriptReference
 from .speech import DiarizationResult, SpeakerSegment, SpeechAnalysisResult, TranscriptionResult, TranscriptSegment
 from .tooling import CommandProvenance, ToolResult
 
@@ -27,6 +30,10 @@ __all__ = [
     "Confidence",
     "DiarizationResult",
     "Estimate",
+    "EvidenceArtifact",
+    "EvidenceManifest",
+    "EvaluationReference",
+    "EvaluationResult",
     "ForensicFinding",
     "ForensicProfile",
     "ForensicReport",
@@ -34,10 +41,12 @@ __all__ = [
     "Severity",
     "SilenceSegment",
     "SilenceSummary",
-    "SourceSeparationResult",
+    "SpeakerReferenceSegment",
     "SpeakerSegment",
     "SpeechAnalysisResult",
     "ToolResult",
+    "ToolVersion",
+    "TranscriptReference",
     "TranscriptionResult",
     "TranscriptSegment",
     "VolumeStats",

@@ -8,9 +8,17 @@ dependencies = [
   "fastmcp",
   "pydantic",
   "uvicorn",
+  "langchain<2.7.5",
+  "langgraph",
+  "langchain-openai",
+  "python-dotenv",
+  "httpx",
 ]
 
 [project.optional-dependencies]
+dev = [
+  "pytest",
+]
 onnx = [
   "onnxruntime",
   "huggingface-hub",

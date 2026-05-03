@@ -159,6 +159,7 @@ def test_diarization_one_speaker_with_legal_roles_and_reported_speech_flags_mism
     fired = _fired_rules(findings)
     assert "reported_speech" in fired
     assert "legal_role_names" in fired
+    assert all("VOICESCRIPT_PYANNOTE_MIN_SPEAKERS" not in finding.recommended_follow_up for finding in findings)
 
 
 def test_diarization_two_speakers_with_concurring_transcript_promotes_to_high():

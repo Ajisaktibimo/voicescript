@@ -15,7 +15,6 @@ def test_settings_loads_values_from_env_file(runtime_dir, monkeypatch):
                 "VOICESCRIPT_FFMPEG=C:/tools/ffmpeg/bin/ffmpeg.exe",
                 "VOICESCRIPT_FFPROBE=C:/tools/ffmpeg/bin/ffprobe.exe",
                 "VOICESCRIPT_INLINE_JOBS=true",
-                "VOICESCRIPT_DEMUCS_ENABLED=false",
                 "PYANNOTE_AUTH_TOKEN=local-token",
             ]
         ),
@@ -31,7 +30,6 @@ def test_settings_loads_values_from_env_file(runtime_dir, monkeypatch):
     assert settings.ffmpeg_binary == "C:/tools/ffmpeg/bin/ffmpeg.exe"
     assert settings.ffprobe_binary == "C:/tools/ffmpeg/bin/ffprobe.exe"
     assert settings.inline_jobs is True
-    assert settings.demucs_enabled is False
     assert settings.pyannote_auth_token == "local-token"
 
 
@@ -83,3 +81,27 @@ def test_settings_loads_onnx_model_configuration(runtime_dir, monkeypatch):
     assert settings.pyannote_onnx_model == "onnx/diarization/model.onnx"
     assert settings.pyannote_onnx_repo_id == "voicescript/pyannote-onnx"
     assert settings.onnx_execution_provider == "CPUExecutionProvider"
+
+
+def test_settings_ignores_deprecated_pyannote_speaker_count_env(runtime_dir, monkeypatch):
+    (runtime_dir / ".env").write_text(
+        "\n".join(
+            [
+                "VOICESCRIPT_API_KEY=from-env-file",
+                "VOICESCRIPT_PYANNOTE_MIN_SPEAKERS=2",
+                "VOICESCRIPT_PYANNOTE_MAX_SPEAKERS=5",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(runtime_dir)
+
+    settings = Settings.from_env()
+
+    assert not hasattr(settings, "pyannote_min_speakers")
+    assert not hasattr(settings, "pyannote_max_speakers")
+
+
+def test_settings_default_llm_model():
+    settings = Settings()
+    assert settings.llm_model == "gpt-5.4-mini"

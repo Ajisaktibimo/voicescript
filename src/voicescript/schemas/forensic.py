@@ -25,13 +25,28 @@ class ForensicFinding(JsonModel):
     recommended_follow_up: str
 
 
-class SourceSeparationResult(JsonModel):
-    engine: str = "demucs"
+
+class EvidenceArtifact(JsonModel):
+    kind: str
+    path: str
+    sha256: str | None = None
+    size_bytes: int | None = None
+    recorded_at: str | None = None
+
+
+class ToolVersion(JsonModel):
+    tool: str
     available: bool
-    enabled: bool
-    vocals_path: str | None = None
-    limitations: list[str] = Field(default_factory=list)
-    provenance: list[CommandProvenance] = Field(default_factory=list)
+    path: str | None = None
+    version: str | None = None
+
+
+class EvidenceManifest(JsonModel):
+    run_id: str
+    generated_at: str
+    source: EvidenceArtifact
+    derived_artifacts: list[EvidenceArtifact] = Field(default_factory=list)
+    tool_versions: list[ToolVersion] = Field(default_factory=list)
 
 
 class ForensicProfile(JsonModel):
@@ -60,18 +75,12 @@ class ForensicReport(JsonModel):
     speaker_segments: list[SpeakerSegment] = Field(default_factory=list)
     transcription: TranscriptionResult = Field(default_factory=TranscriptionResult)
     diarization: DiarizationResult = Field(default_factory=DiarizationResult)
-    source_separation: SourceSeparationResult = Field(
-        default_factory=lambda: SourceSeparationResult(
-            available=False,
-            enabled=True,
-            limitations=["Demucs source separation was not run."],
-        )
-    )
     tamper_indicators: list[ForensicFinding] = Field(default_factory=list)
     issues: list[str] = Field(default_factory=list)
     recommendations: list[str] = Field(default_factory=list)
     confidence_scores: dict[str, Confidence] = Field(default_factory=dict)
     evidence_trail: list[str] = Field(default_factory=list)
+    evidence_manifest: EvidenceManifest | None = None
     limitations: list[str] = Field(default_factory=list)
     summary_text: str
     provenance: list[CommandProvenance] = Field(default_factory=list)

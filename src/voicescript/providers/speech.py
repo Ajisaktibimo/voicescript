@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Protocol
 
 from voicescript.config import Settings
-from voicescript.schemas import DiarizationResult, SpeakerSegment, SpeechAnalysisResult, TranscriptionResult, TranscriptSegment
+from voicescript.schemas import AudioMetadata, DiarizationResult, SpeakerSegment, SpeechAnalysisResult, TranscriptionResult, TranscriptSegment
 
 
 ALLOWED_PROVIDER_NAMES = ("api", "disabled", "huggingface", "local", "local-onnx", "onnx", "other")
@@ -27,7 +27,7 @@ class DiarizationProvider(Protocol):
     def readiness(self) -> dict[str, dict[str, str | bool]]:
         ...
 
-    def diarize(self, input_file: Path) -> DiarizationResult:
+    def diarize(self, input_file: Path, *, audio_metadata: AudioMetadata | None = None) -> DiarizationResult:
         ...
 
 
@@ -58,7 +58,7 @@ class DisabledDiarizer:
             "pyannote.audio": {"available": False, "detail": "disabled"},
         }
 
-    def diarize(self, input_file: Path) -> DiarizationResult:
+    def diarize(self, input_file: Path, *, audio_metadata: AudioMetadata | None = None) -> DiarizationResult:
         return _diarization_result(
             provider=self.provider_name,
             input_path=input_file,
@@ -105,7 +105,7 @@ class UnavailableDiarizer:
             }
         }
 
-    def diarize(self, input_file: Path) -> DiarizationResult:
+    def diarize(self, input_file: Path, *, audio_metadata: AudioMetadata | None = None) -> DiarizationResult:
         return _diarization_result(
             provider=self.provider_name,
             input_path=input_file,
@@ -253,7 +253,7 @@ class LocalPyannoteDiarizer:
         self,
         input_file: Path,
         *,
-        hints: dict | None = None,
+        audio_metadata: AudioMetadata | None = None,
     ) -> DiarizationResult:
         status = _module_status("pyannote.audio", needs_token=True, token=self.settings.pyannote_auth_token)
         if not status["available"]:
@@ -273,7 +273,14 @@ class LocalPyannoteDiarizer:
                 limitations=["Diarization skipped because PYANNOTE_AUTH_TOKEN is not configured."],
             )
 
-        pipeline_kwargs = self._resolve_pipeline_hints(hints)
+        if audio_metadata and audio_metadata.duration_seconds and audio_metadata.duration_seconds < 0.5:
+            return _diarization_result(
+                provider=self.provider_name,
+                model=self.settings.pyannote_model,
+                input_path=input_file,
+                output_type="none",
+                limitations=["Audio duration is too short for reliable diarization (minimum 0.5s required)."],
+            )
 
         try:
             from pyannote.audio import Pipeline
@@ -282,21 +289,31 @@ class LocalPyannoteDiarizer:
                 self.settings.pyannote_model,
                 token=self.settings.pyannote_auth_token,
             )
-            diarization = pipeline(str(input_file), **pipeline_kwargs)
+            
+            clustering_params = self._resolve_clustering_params(audio_metadata)
+            if clustering_params:
+                pipeline.instantiate({"clustering": clustering_params})
+
+            diarization = pipeline(str(input_file))
         except Exception as exc:
+            err_msg = str(exc)
+            limitations = [f"Diarization failed in local pyannote provider: {exc}"]
+            if "degrees of freedom" in err_msg or "reduction factor" in err_msg:
+                limitations.append("PyTorch internal error: input window too small for standard deviation calculation.")
+            
             return _diarization_result(
                 provider=self.provider_name,
                 model=self.settings.pyannote_model,
                 input_path=input_file,
                 output_type="error",
-                limitations=[f"Diarization failed in local pyannote provider: {exc}"],
+                limitations=limitations,
             )
 
         output_type = type(diarization).__name__
         segments, limitations = _parse_pyannote_diarization(diarization)
         evidence = [f"Raw diarization output type: {output_type}."]
-        if pipeline_kwargs:
-            evidence.append(f"Pyannote pipeline hints: {pipeline_kwargs}.")
+        if clustering_params:
+            evidence.append(f"Pyannote clustering parameters overrides: {clustering_params}.")
         return _diarization_result(
             provider=self.provider_name,
             model=self.settings.pyannote_model,
@@ -307,17 +324,55 @@ class LocalPyannoteDiarizer:
             evidence=evidence,
         )
 
-    def _resolve_pipeline_hints(self, hints: dict | None) -> dict[str, int]:
-        merged: dict[str, int] = {}
-        if self.settings.pyannote_min_speakers is not None:
-            merged["min_speakers"] = int(self.settings.pyannote_min_speakers)
-        if self.settings.pyannote_max_speakers is not None:
-            merged["max_speakers"] = int(self.settings.pyannote_max_speakers)
-        if hints:
-            for key in ("min_speakers", "max_speakers", "num_speakers"):
-                if hints.get(key) is not None:
-                    merged[key] = int(hints[key])
-        return merged
+    def _adaptive_clustering_params(self, metadata: AudioMetadata | None) -> dict | None:
+        if metadata is None:
+            return None
+
+        base_threshold = 0.7045
+        base_cluster_size = 12
+        
+        threshold_degradation = 0.0
+        cluster_size_reduction = 0
+
+        if metadata.bitrate and metadata.bitrate < 128000:
+            threshold_degradation += 0.15
+            cluster_size_reduction += 4
+        if metadata.bitrate and metadata.bitrate < 64000:
+            threshold_degradation += 0.10
+            cluster_size_reduction += 4
+
+        if metadata.sample_rate and metadata.sample_rate <= 16000:
+            threshold_degradation += 0.05
+
+        if metadata.channels and metadata.channels == 1:
+            threshold_degradation += 0.02
+
+        if threshold_degradation == 0.0 and cluster_size_reduction == 0:
+            return None
+
+        return {
+            "threshold": max(0.30, base_threshold - threshold_degradation),
+            "min_cluster_size": max(2, base_cluster_size - cluster_size_reduction)
+        }
+
+    def _resolve_clustering_params(self, metadata: AudioMetadata | None = None) -> dict | None:
+        params: dict = {}
+        
+        adaptive_params = self._adaptive_clustering_params(metadata) or {}
+
+        if self.settings.pyannote_clustering_threshold is not None:
+            params["threshold"] = self.settings.pyannote_clustering_threshold
+        elif "threshold" in adaptive_params:
+            params["threshold"] = adaptive_params["threshold"]
+                
+        if self.settings.pyannote_min_cluster_size is not None:
+            params["min_cluster_size"] = self.settings.pyannote_min_cluster_size
+        elif "min_cluster_size" in adaptive_params:
+            params["min_cluster_size"] = adaptive_params["min_cluster_size"]
+            
+        if params:
+            params.setdefault("method", "centroid")
+        return params or None
 
 
 def _parse_pyannote_diarization(diarization: object) -> tuple[list[SpeakerSegment], list[str]]:
@@ -581,7 +636,7 @@ class LocalOnnxDiarizer:
             "onnxruntime": runtime_status,
         }
 
-    def diarize(self, input_file: Path) -> DiarizationResult:
+    def diarize(self, input_file: Path, *, audio_metadata: AudioMetadata | None = None) -> DiarizationResult:
         runtime_status = _module_status("onnxruntime")
         if not runtime_status["available"]:
             return _diarization_result(
@@ -628,13 +683,12 @@ class SpeechAnalyzer:
     def readiness(self) -> dict[str, dict[str, str | bool]]:
         return {**self.transcriber.readiness(), **self.diarizer.readiness()}
 
-    def _call_diarizer(self, diarization_input: Path, *, hints: dict | None) -> DiarizationResult:
-        if hints:
-            try:
-                return self.diarizer.diarize(diarization_input, hints=hints)
-            except TypeError:
-                pass
-        return self.diarizer.diarize(diarization_input)
+    def _call_diarizer(self, diarization_input: Path, *, audio_metadata: AudioMetadata | None = None) -> DiarizationResult:
+        try:
+            return self.diarizer.diarize(diarization_input, audio_metadata=audio_metadata)
+        except TypeError:
+            # Fallback for providers that don't support the new signature
+            return self.diarizer.diarize(diarization_input)
 
     def analyze(
         self,
@@ -643,7 +697,7 @@ class SpeechAnalyzer:
         diarization_input: Path | None = None,
         transcription_source: str = "analysis_input",
         diarization_source: str = "analysis_input",
-        diarization_hints: dict | None = None,
+        audio_metadata: AudioMetadata | None = None,
     ) -> SpeechAnalysisResult:
         diarization_input = diarization_input or transcription_input
         transcription = _tag_transcription_input(
@@ -652,7 +706,7 @@ class SpeechAnalyzer:
             transcription_source,
         )
         diarization = _tag_diarization_input(
-            self._call_diarizer(diarization_input, hints=diarization_hints),
+            self._call_diarizer(diarization_input, audio_metadata=audio_metadata),
             diarization_input,
             diarization_source,
         )
@@ -799,18 +853,27 @@ def _align_transcript_to_speakers(
 ) -> list[SpeakerSegment]:
     if not diarization_segments:
         return []
-    if not transcript_segments:
-        return diarization_segments
 
     aligned: list[SpeakerSegment] = []
-    for transcript in transcript_segments:
-        best = _best_overlap(transcript, diarization_segments)
+    for diar_seg in diarization_segments:
+        # Collect all transcripts that have their 'best overlap' with this diarization segment.
+        # This prevents duplicating transcript text across multiple speaker segments
+        # while ensuring each diarization interval is represented in the output.
+        overlapping_texts = []
+        for trans_seg in transcript_segments:
+            if _best_overlap(trans_seg, diarization_segments) == diar_seg:
+                overlapping_texts.append(trans_seg.text)
+
+        text = " ".join(overlapping_texts).strip()
+        if not text:
+            text = "[Inaudible / No Transcript]"
+
         aligned.append(
             SpeakerSegment(
-                speaker=best.speaker if best else "UNKNOWN",
-                start_seconds=transcript.start_seconds,
-                end_seconds=transcript.end_seconds,
-                text=transcript.text,
+                speaker=diar_seg.speaker,
+                start_seconds=diar_seg.start_seconds,
+                end_seconds=diar_seg.end_seconds,
+                text=text,
             )
         )
     return aligned

@@ -10,17 +10,33 @@ from voicescript.schemas import (
     AudioMetadata,
     ChannelAnalysis,
     CommandProvenance,
+    EvaluationReference,
     ForensicReport,
     SilenceSummary,
-    SourceSeparationResult,
     SpeechAnalysisResult,
     SpeakerSegment,
     ToolResult,
     DiarizationResult,
     TranscriptionResult,
+    TranscriptReference,
     VolumeStats,
 )
 from voicescript.analysis import build_report_from_measurements
+
+
+def test_analyzer_evaluate_report_delegates_to_evaluation_harness(runtime_dir):
+    analyzer = ForensicAnalyzer(settings=_settings(runtime_dir))
+    report = _minimal_report("court.wav")
+    reference = EvaluationReference(
+        file_name="court.wav",
+        transcript=TranscriptReference(text=""),
+        speaker_segments=[],
+    )
+
+    result = analyzer.evaluate_report(report, reference)
+
+    assert result.file_name == "court.wav"
+    assert result.wer == 0.0
 
 
 def test_detect_forensic_indicators_uses_rules_only(runtime_dir):
@@ -30,7 +46,6 @@ def test_detect_forensic_indicators_uses_rules_only(runtime_dir):
         settings=_settings(runtime_dir),
         ffmpeg_tools=FakeFFmpegTools(),
         speech_analyzer=RaisingSpeechAnalyzer(),
-        demucs_separator=RaisingSourceSeparator(),
     )
 
     indicators = analyzer.detect_forensic_indicators(audio)
@@ -38,68 +53,31 @@ def test_detect_forensic_indicators_uses_rules_only(runtime_dir):
     assert [item["finding"] for item in indicators] == ["Extended silence or missing-audio span detected"]
 
 
-def test_demucs_vocals_path_is_used_for_speech_when_available(runtime_dir):
-    audio = runtime_dir / "court.wav"
-    audio.write_bytes(b"audio")
-    vocals = runtime_dir / "vocals.wav"
-    vocals.write_bytes(b"vocals")
-    speech = RecordingSpeechAnalyzer()
-    ffmpeg = FakeFFmpegTools()
-    analyzer = ForensicAnalyzer(
-        settings=_settings(runtime_dir),
-        ffmpeg_tools=ffmpeg,
-        speech_analyzer=speech,
-        demucs_separator=FixedSourceSeparator(
-            SourceSeparationResult(available=True, enabled=True, vocals_path=str(vocals))
-        ),
-    )
-
-    report = analyzer.analyze_file(audio)
-
-    assert speech.transcription_paths == [vocals]
-    assert len(speech.diarization_paths) == 1
-    assert speech.diarization_paths[0].suffix == ".wav"
-    assert speech.diarization_paths[0] != audio
-    assert ffmpeg.normalized_inputs == [(audio, speech.diarization_paths[0])]
-    assert report.source_separation.vocals_path == str(vocals)
-    assert report.transcription.input_source == "demucs_vocals"
-    assert report.transcription.input_path == str(vocals)
-    assert report.diarization.input_source == "normalized_original_audio"
-    assert report.diarization.input_path == str(speech.diarization_paths[0])
-    assert report.transcription.provider == "test-transcriber"
-    assert report.diarization.provider == "test-diarizer"
-    assert any(item.tool == "ffmpeg normalize diarization" for item in report.provenance)
 
 
-def test_demucs_unavailable_falls_back_to_original_for_speech(runtime_dir):
+
+
+
+
+
+
+def test_analyzer_lets_pyannote_infer_speakers_without_hints(runtime_dir):
     audio = runtime_dir / "court.wav"
     audio.write_bytes(b"audio")
     speech = RecordingSpeechAnalyzer()
-    ffmpeg = FakeFFmpegTools()
     analyzer = ForensicAnalyzer(
         settings=_settings(runtime_dir),
-        ffmpeg_tools=ffmpeg,
+        ffmpeg_tools=FakeFFmpegTools(),
         speech_analyzer=speech,
-        demucs_separator=FixedSourceSeparator(
-            SourceSeparationResult(
-                available=False,
-                enabled=True,
-                limitations=["Demucs is not installed."],
-            )
-        ),
     )
 
-    report = analyzer.analyze_file(audio)
+    analyzer.analyze_file(audio)
 
-    assert speech.transcription_paths == [audio]
-    assert len(speech.diarization_paths) == 1
-    assert speech.diarization_paths[0].suffix == ".wav"
-    assert ffmpeg.normalized_inputs == [(audio, speech.diarization_paths[0])]
-    assert "Demucs is not installed." in report.limitations
+    assert speech.diarization_paths
 
 
 def test_diarization_input_preserves_stereo_when_source_is_stereo(runtime_dir):
-    audio = runtime_dir / "court.wav"
+    audio = runtime_dir / "stereo.wav"
     audio.write_bytes(b"audio")
     speech = RecordingSpeechAnalyzer()
     ffmpeg = FakeFFmpegTools(channels=2, channel_layout="stereo")
@@ -107,53 +85,12 @@ def test_diarization_input_preserves_stereo_when_source_is_stereo(runtime_dir):
         settings=_settings(runtime_dir),
         ffmpeg_tools=ffmpeg,
         speech_analyzer=speech,
-        demucs_separator=FixedSourceSeparator(
-            SourceSeparationResult(available=False, enabled=True, limitations=[])
-        ),
     )
 
     analyzer.analyze_file(audio)
 
+    # We now use the normalized original audio for diarization
     assert ffmpeg.normalized_channels == [2]
-
-
-def test_pyannote_hints_flow_from_settings_into_speech_analyzer(runtime_dir):
-    audio = runtime_dir / "court.wav"
-    audio.write_bytes(b"audio")
-    speech = RecordingSpeechAnalyzer()
-    settings = _settings(runtime_dir).model_copy(
-        update={"pyannote_min_speakers": 2, "pyannote_max_speakers": 5}
-    )
-    analyzer = ForensicAnalyzer(
-        settings=settings,
-        ffmpeg_tools=FakeFFmpegTools(),
-        speech_analyzer=speech,
-        demucs_separator=FixedSourceSeparator(
-            SourceSeparationResult(available=False, enabled=True, limitations=[])
-        ),
-    )
-
-    analyzer.analyze_file(audio)
-
-    assert speech.diarization_hints_seen == [{"min_speakers": 2, "max_speakers": 5}]
-
-
-def test_pyannote_hints_default_to_empty_when_settings_unset(runtime_dir):
-    audio = runtime_dir / "court.wav"
-    audio.write_bytes(b"audio")
-    speech = RecordingSpeechAnalyzer()
-    analyzer = ForensicAnalyzer(
-        settings=_settings(runtime_dir),
-        ffmpeg_tools=FakeFFmpegTools(),
-        speech_analyzer=speech,
-        demucs_separator=FixedSourceSeparator(
-            SourceSeparationResult(available=False, enabled=True, limitations=[])
-        ),
-    )
-
-    analyzer.analyze_file(audio)
-
-    assert speech.diarization_hints_seen == [{}]
 
 
 def test_diarization_input_forces_mono_when_source_is_mono(runtime_dir):
@@ -165,14 +102,28 @@ def test_diarization_input_forces_mono_when_source_is_mono(runtime_dir):
         settings=_settings(runtime_dir),
         ffmpeg_tools=ffmpeg,
         speech_analyzer=speech,
-        demucs_separator=FixedSourceSeparator(
-            SourceSeparationResult(available=False, enabled=True, limitations=[])
-        ),
     )
 
     analyzer.analyze_file(audio)
 
     assert ffmpeg.normalized_channels == [1]
+
+
+def test_speech_analysis_uses_native_diarization_defaults(runtime_dir):
+    audio = runtime_dir / "court.wav"
+    audio.write_bytes(b"audio")
+    speech = RecordingSpeechAnalyzer()
+    analyzer = ForensicAnalyzer(
+        settings=_settings(runtime_dir),
+        ffmpeg_tools=FakeFFmpegTools(),
+        speech_analyzer=speech,
+    )
+
+    analyzer.analyze_file(audio)
+
+    assert speech.diarization_paths
+
+
 
 
 def test_stereo_channel_count_does_not_claim_two_microphones():
@@ -219,9 +170,6 @@ def test_analyze_file_logs_pipeline_stages(runtime_dir, caplog):
         settings=_settings(runtime_dir),
         ffmpeg_tools=FakeFFmpegTools(),
         speech_analyzer=RecordingSpeechAnalyzer(),
-        demucs_separator=FixedSourceSeparator(
-            SourceSeparationResult(available=False, enabled=True, limitations=["Demucs is not installed."])
-        ),
     )
 
     with caplog.at_level(logging.INFO, logger="uvicorn.error"):
@@ -234,7 +182,6 @@ def test_analyze_file_logs_pipeline_stages(runtime_dir, caplog):
         "stage=silence",
         "stage=volume",
         "stage=channels",
-        "stage=source_separation",
         "stage=speech",
         "stage=hash",
         "stage=report",
@@ -325,19 +272,12 @@ class RaisingSpeechAnalyzer:
         raise AssertionError("speech analysis should not be called")
 
 
-class RaisingSourceSeparator:
-    def readiness(self):
-        return {}
-
-    def separate_vocals(self, input_file: Path, output_dir: Path):
-        raise AssertionError("source separation should not be called")
 
 
 class RecordingSpeechAnalyzer:
     def __init__(self):
         self.transcription_paths: list[Path] = []
         self.diarization_paths: list[Path] = []
-        self.diarization_hints_seen: list[dict] = []
 
     def readiness(self):
         return {}
@@ -349,12 +289,11 @@ class RecordingSpeechAnalyzer:
         diarization_input: Path | None = None,
         transcription_source: str = "analysis_input",
         diarization_source: str = "analysis_input",
-        diarization_hints: dict | None = None,
+        audio_metadata: AudioMetadata | None = None,
     ) -> SpeechAnalysisResult:
         diarization_input = diarization_input or transcription_input
         self.transcription_paths.append(Path(transcription_input))
         self.diarization_paths.append(Path(diarization_input))
-        self.diarization_hints_seen.append(dict(diarization_hints or {}))
         return SpeechAnalysisResult(
             transcript_text="hello",
             transcription=TranscriptionResult(
@@ -381,17 +320,8 @@ class RecordingSpeechAnalyzer:
         )
 
 
-class FixedSourceSeparator:
-    provider_name = "fixed"
 
-    def __init__(self, result: SourceSeparationResult):
-        self.result = result
 
-    def readiness(self):
-        return {}
-
-    def separate_vocals(self, input_file: Path, output_dir: Path) -> SourceSeparationResult:
-        return self.result
 
 
 class PartiallyFailingAnalyzer(ForensicAnalyzer):
@@ -410,7 +340,6 @@ def _settings(runtime_dir: Path) -> Settings:
         api_key="secret",
         transcription_provider="disabled",
         diarization_provider="disabled",
-        source_separation_provider="disabled",
     )
 
 

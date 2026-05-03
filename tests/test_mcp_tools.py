@@ -28,8 +28,9 @@ class FakeAnalyzer:
     def detect_forensic_indicators(self, path: Path):
         return []
 
-    def isolate_vocals(self, input_file: Path, output_dir: Path | None = None):
-        return {"engine": "demucs", "available": False, "enabled": True, "vocals_path": None}
+
+    def evaluate_report(self, report, reference):
+        return {"file_name": report["file_name"], "wer": 0.0}
 
 
 def test_mcp_toolset_delegates_to_analyzer_and_returns_json_ready_data():
@@ -41,6 +42,17 @@ def test_mcp_toolset_delegates_to_analyzer_and_returns_json_ready_data():
     assert toolset.estimate_speakers("court.wav")["confidence"] == "low"
     assert toolset.estimate_microphone_setup("court.wav")["value"] == 1
     assert toolset.detect_forensic_indicators("court.wav") == []
-    assert toolset.isolate_vocals("court.wav")["engine"] == "demucs"
     assert toolset.analyze_audio_file("court.wav")["file_name"] == "court.wav"
     assert toolset.analyze_audio_batch(["a.wav", "b.wav"])["file_count"] == 2
+
+
+def test_evaluate_report_tool_delegates_to_analyzer():
+    toolset = McpToolset(analyzer=FakeAnalyzer())
+
+    result = toolset.evaluate_report(
+        {"file_name": "court.wav", "sha256": "abc"},
+        {"file_name": "court.wav", "transcript": {"text": ""}, "speaker_segments": []},
+    )
+
+    assert result["file_name"] == "court.wav"
+    assert result["wer"] == 0.0

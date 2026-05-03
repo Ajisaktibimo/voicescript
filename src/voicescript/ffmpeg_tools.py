@@ -103,20 +103,17 @@ class FFmpegTools:
             target_channels = 1
         else:
             target_channels = max(1, int(channels))
-        return self.run(
-            [
-                self.settings.ffmpeg_binary,
-                "-y",
-                "-i",
-                str(input_file),
-                "-ar",
-                "16000",
-                "-ac",
-                str(target_channels),
-                str(output_file),
-            ],
-            required_binary=self.settings.ffmpeg_binary,
-        )
+            
+        cmd = [
+            self.settings.ffmpeg_binary,
+            "-y",
+            "-i", str(input_file),
+            "-ar", "16000",
+            "-ac", str(target_channels),
+            str(output_file)
+        ]
+
+        return self.run(cmd, required_binary=self.settings.ffmpeg_binary)
 
     def run(self, command: list[str], *, required_binary: str) -> ToolResult:
         if shutil.which(required_binary) is None:

@@ -127,8 +127,7 @@ def apply_speaker_fusion(
                 confidence="medium",
                 evidence=[c.evidence_line() for c in cues],
                 recommended_follow_up=(
-                    "Re-run diarization with explicit speaker hints "
-                    "(VOICESCRIPT_PYANNOTE_MIN_SPEAKERS) or have an analyst verify the speaker count manually."
+                    "Review the native pyannote diarization output and have an analyst verify the speaker count manually."
                 ),
             )
         )

@@ -6,10 +6,13 @@ from fastmcp import FastMCP
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from voicescript.mcp_tools import McpToolset
+from voicescript.agent import ForensicAgent
+from voicescript.models import to_jsonable
 
 
 mcp = FastMCP("CourtAudioForensicMCP")
 tools = McpToolset()
+agent = ForensicAgent()
 
 
 @mcp.tool()
@@ -66,11 +69,6 @@ def generate_spectrogram(input_file: str, output_image: str) -> dict[str, object
     return tools.generate_spectrogram(input_file, output_image)
 
 
-@mcp.tool()
-def isolate_vocals(input_file: str, output_dir: str | None = None) -> dict[str, object]:
-    """Use Demucs to isolate a vocals stem when the local dependency is available."""
-    return tools.isolate_vocals(input_file, output_dir)
-
 
 @mcp.tool()
 def analyze_audio_file(input_file: str) -> dict[str, object]:
@@ -79,9 +77,21 @@ def analyze_audio_file(input_file: str) -> dict[str, object]:
 
 
 @mcp.tool()
+def analyze_with_agent(input_file: str) -> dict[str, object]:
+    """Perform an agentic audio analysis with human-readable insights using an LLM."""
+    return to_jsonable(agent.analyze_file(input_file))
+
+
+@mcp.tool()
 def analyze_audio_batch(input_files: list[str]) -> dict[str, object]:
     """Run forensic triage analysis for multiple audio files and aggregate results."""
     return tools.analyze_audio_batch(input_files)
+
+
+@mcp.tool()
+def evaluate_report(report: dict[str, object], reference: dict[str, object]) -> dict[str, object]:
+    """Evaluate a forensic report against a human reference fixture."""
+    return tools.evaluate_report(report, reference)
 
 
 if __name__ == "__main__":

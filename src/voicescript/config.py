@@ -13,6 +13,10 @@ class Settings(BaseModel):
     inline_jobs: bool = False
     max_upload_size_bytes: int = 500 * 1024 * 1024
     max_batch_files: int = 25
+    api_port: int = 8000
+    llm_provider: str = "openai"
+    llm_model: str = "gpt-5.4-mini"
+    openai_api_key: str = ""
     ffmpeg_binary: str = "ffmpeg"
     ffprobe_binary: str = "ffprobe"
     silence_noise_db: str = "-50dB"
@@ -20,14 +24,13 @@ class Settings(BaseModel):
     low_volume_threshold_db: float = -30.0
     transcription_provider: str = "local"
     diarization_provider: str = "local"
-    source_separation_provider: str = "local"
     whisper_model: str = "small"
     whisper_device: str = "auto"
     whisper_compute_type: str = "int8"
     pyannote_model: str = "pyannote/speaker-diarization-3.1"
     pyannote_auth_token: str | None = None
-    pyannote_min_speakers: int | None = None
-    pyannote_max_speakers: int | None = None
+    pyannote_clustering_threshold: float | None = None
+    pyannote_min_cluster_size: int | None = None
     model_fetch_policy: str = "local_only"
     model_cache_dir: Path = Field(default=Path("data/models"))
     onnx_model_dir: Path = Field(default=Path("data/models"))
@@ -37,8 +40,6 @@ class Settings(BaseModel):
     pyannote_onnx_model: str = "pyannote.onnx"
     pyannote_onnx_repo_id: str | None = None
     onnx_execution_provider: str = "CPUExecutionProvider"
-    demucs_enabled: bool = True
-    demucs_model: str = "htdemucs"
 
     @classmethod
     def from_env(cls, *, require_api_key: bool = True) -> "Settings":
@@ -67,6 +68,10 @@ class Settings(BaseModel):
             inline_jobs=inline_jobs,
             max_upload_size_bytes=int(get("VOICESCRIPT_MAX_UPLOAD_SIZE_BYTES", str(500 * 1024 * 1024)) or "0"),
             max_batch_files=int(get("VOICESCRIPT_MAX_BATCH_FILES", "25") or "25"),
+            api_port=int(get("VOICESCRIPT_PORT", "8000") or "8000"),
+            llm_provider=get("VOICESCRIPT_LLM_PROVIDER", "openai") or "openai",
+            llm_model=get("VOICESCRIPT_LLM_MODEL", "gpt-5.4-mini") or "gpt-5.4-mini",
+            openai_api_key=get("OPENAI_API_KEY", "") or "",
             ffmpeg_binary=get("VOICESCRIPT_FFMPEG", "ffmpeg") or "ffmpeg",
             ffprobe_binary=get("VOICESCRIPT_FFPROBE", "ffprobe") or "ffprobe",
             silence_noise_db=get("VOICESCRIPT_SILENCE_NOISE_DB", "-50dB") or "-50dB",
@@ -74,15 +79,14 @@ class Settings(BaseModel):
             low_volume_threshold_db=float(get("VOICESCRIPT_LOW_VOLUME_THRESHOLD_DB", "-30") or "-30"),
             transcription_provider=(get("VOICESCRIPT_TRANSCRIPTION_PROVIDER", "local") or "local").lower(),
             diarization_provider=(get("VOICESCRIPT_DIARIZATION_PROVIDER", "local") or "local").lower(),
-            source_separation_provider=(get("VOICESCRIPT_SOURCE_SEPARATION_PROVIDER", "local") or "local").lower(),
             whisper_model=get("VOICESCRIPT_WHISPER_MODEL", "small") or "small",
             whisper_device=get("VOICESCRIPT_WHISPER_DEVICE", "auto") or "auto",
             whisper_compute_type=get("VOICESCRIPT_WHISPER_COMPUTE_TYPE", "int8") or "int8",
             pyannote_model=get("VOICESCRIPT_PYANNOTE_MODEL", "pyannote/speaker-diarization-3.1")
             or "pyannote/speaker-diarization-3.1",
             pyannote_auth_token=get("PYANNOTE_AUTH_TOKEN"),
-            pyannote_min_speakers=_optional_int(get("VOICESCRIPT_PYANNOTE_MIN_SPEAKERS")),
-            pyannote_max_speakers=_optional_int(get("VOICESCRIPT_PYANNOTE_MAX_SPEAKERS")),
+            pyannote_clustering_threshold=_optional_float(get("VOICESCRIPT_PYANNOTE_CLUSTERING_THRESHOLD")),
+            pyannote_min_cluster_size=_optional_int(get("VOICESCRIPT_PYANNOTE_MIN_CLUSTER_SIZE")),
             model_fetch_policy=model_fetch_policy,
             model_cache_dir=model_cache_dir,
             onnx_model_dir=model_cache_dir,
@@ -93,8 +97,6 @@ class Settings(BaseModel):
             pyannote_onnx_repo_id=get("VOICESCRIPT_PYANNOTE_ONNX_REPO_ID"),
             onnx_execution_provider=get("VOICESCRIPT_ONNX_EXECUTION_PROVIDER", "CPUExecutionProvider")
             or "CPUExecutionProvider",
-            demucs_enabled=_truthy(get("VOICESCRIPT_DEMUCS_ENABLED", "true")),
-            demucs_model=get("VOICESCRIPT_DEMUCS_MODEL", "htdemucs") or "htdemucs",
         )
         _setup_windows_dlls(settings)
         return settings
@@ -130,6 +132,15 @@ def _optional_int(value: str | None) -> int | None:
         return None
     try:
         return int(str(value).strip())
+    except ValueError:
+        return None
+
+
+def _optional_float(value: str | None) -> float | None:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return float(str(value).strip())
     except ValueError:
         return None
 
